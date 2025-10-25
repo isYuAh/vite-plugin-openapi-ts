@@ -131,11 +131,216 @@ const { data: profile } = await apiClient(
 - ✅ Query parameters
 - ✅ Header parameters
 - ✅ Cookie parameters
-- ✅ Request body (JSON, FormData)
+- ✅ Request body (JSON, FormData auto-detection)
 - ✅ Response types with status codes
 - ✅ Error handling with `ApiError` class
 - ✅ Configurable base URL and headers
+- ✅ **Request/Response Interceptors**
+- ✅ **Request Cancellation (AbortController)**
+- ✅ **Timeout Control**
+- ✅ **Automatic Retry with Configurable Strategy**
+- ✅ **Global Error Handler**
+- ✅ **Automatic FormData Conversion for File Uploads**
 - ✅ Full TypeScript IntelliSense support
+
+## Advanced Features
+
+### Request/Response Interceptors
+
+```ts
+import apiClient, { interceptors } from './openapi';
+
+// Add request interceptor
+const removeRequestInterceptor = interceptors.request.use(async (config) => {
+  // Add authentication token
+  config.headers['Authorization'] = `Bearer ${getToken()}`;
+  console.log('Request:', config.method, config.url.pathname);
+  return config;
+});
+
+// Add response interceptor
+interceptors.response.use(async (response) => {
+  console.log('Response:', response.response.status);
+  return response;
+});
+
+// Add error interceptor
+interceptors.error.use(async (error) => {
+  console.error('Request failed:', error.message);
+  if (error.status === 401) {
+    // Redirect to login
+    window.location.href = '/login';
+  }
+  throw error;
+});
+
+// Remove interceptor when needed
+removeRequestInterceptor();
+```
+
+### Request Cancellation
+
+```ts
+import apiClient from './openapi';
+
+// Create abort controller
+const controller = new AbortController();
+
+// Pass signal to request
+apiClient('/users', 'get', {
+  requestConfig: {
+    signal: controller.signal
+  }
+});
+
+// Cancel request
+controller.abort();
+
+// Example: Cancel on component unmount (React)
+useEffect(() => {
+  const controller = new AbortController();
+  
+  apiClient('/users', 'get', {
+    requestConfig: { signal: controller.signal }
+  });
+  
+  return () => controller.abort();
+}, []);
+```
+
+### Timeout Control
+
+```ts
+import apiClient, { config } from './openapi';
+
+// Set global timeout (default: 30000ms)
+config.timeout = 10000; // 10 seconds
+
+// Or set timeout per request
+apiClient('/users', 'get', {
+  requestConfig: {
+    timeout: 5000 // 5 seconds for this request
+  }
+});
+```
+
+### Automatic Retry
+
+```ts
+// Simple retry: retry 3 times
+apiClient('/users', 'get', {
+  requestConfig: {
+    retry: 3
+  }
+});
+
+// Advanced retry with custom strategy
+apiClient('/users', 'post', {
+  body: { name: 'John' },
+  requestConfig: {
+    retry: {
+      times: 3,
+      delay: 1000, // 1 second between retries
+      retryOn: (error) => {
+        // Only retry on 5xx server errors
+        return error.status >= 500;
+      }
+    }
+  }
+});
+```
+
+### Global Error Handler
+
+```ts
+import { setErrorHandler } from './openapi';
+
+// Set global error handler
+setErrorHandler((error) => {
+  // Show toast notification
+  toast.error(error.message);
+  
+  // Log to error tracking service
+  errorTracker.log(error);
+});
+
+// Now all errors will be handled globally
+apiClient('/users', 'get'); // Errors automatically handled
+```
+
+### File Upload with Auto FormData
+
+```ts
+// The client automatically detects File/Blob and converts to FormData
+const fileInput = document.querySelector('input[type="file"]');
+
+apiClient('/upload', 'post', {
+  body: {
+    file: fileInput.files[0],     // File object
+    username: 'John',              // Regular fields
+    metadata: { tags: ['photo'] }  // Objects are JSON stringified
+  }
+  // Automatically converted to FormData
+  // Content-Type header automatically set to multipart/form-data
+});
+
+// Multiple files
+apiClient('/upload-multiple', 'post', {
+  body: {
+    files: fileInput.files,  // FileList
+    userId: '123'
+  }
+});
+```
+
+### Complete Example
+
+```ts
+import apiClient, { config, interceptors, setErrorHandler } from './openapi';
+
+// Global configuration
+config.baseUrl = 'https://api.example.com';
+config.timeout = 15000;
+
+// Add authentication
+interceptors.request.use(async (config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Handle token refresh
+interceptors.error.use(async (error) => {
+  if (error.status === 401) {
+    await refreshToken();
+    // Retry the request
+  }
+  throw error;
+});
+
+// Global error handling
+setErrorHandler((error) => {
+  if (error.status === 0) {
+    toast.error('Network error. Please check your connection.');
+  } else {
+    toast.error(error.message);
+  }
+});
+
+// Make requests with all features
+const controller = new AbortController();
+
+const { data } = await apiClient('/users', 'get', {
+  query: { page: 1 },
+  requestConfig: {
+    timeout: 5000,
+    retry: 3,
+    signal: controller.signal
+  }
+});
+```
 
 ## License
 

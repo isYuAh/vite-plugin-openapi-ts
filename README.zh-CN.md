@@ -174,11 +174,216 @@ try {
 - ✅ 查询参数（Query parameters）
 - ✅ 请求头参数（Header parameters）
 - ✅ Cookie 参数（Cookie parameters）
-- ✅ 请求体（JSON、FormData）
+- ✅ 请求体（JSON、FormData 自动检测）
 - ✅ 带状态码的响应类型
 - ✅ 使用 `ApiError` 类进行错误处理
 - ✅ 可配置的 baseUrl 和 headers
+- ✅ **请求/响应拦截器**
+- ✅ **请求取消（AbortController）**
+- ✅ **超时控制**
+- ✅ **可配置策略的自动重试**
+- ✅ **全局错误处理器**
+- ✅ **文件上传自动转换 FormData**
 - ✅ 完整的 TypeScript IntelliSense 支持
+
+## 高级功能
+
+### 请求/响应拦截器
+
+```ts
+import apiClient, { interceptors } from './openapi';
+
+// 添加请求拦截器
+const removeRequestInterceptor = interceptors.request.use(async (config) => {
+  // 添加认证 token
+  config.headers['Authorization'] = `Bearer ${getToken()}`;
+  console.log('请求:', config.method, config.url.pathname);
+  return config;
+});
+
+// 添加响应拦截器
+interceptors.response.use(async (response) => {
+  console.log('响应:', response.response.status);
+  return response;
+});
+
+// 添加错误拦截器
+interceptors.error.use(async (error) => {
+  console.error('请求失败:', error.message);
+  if (error.status === 401) {
+    // 跳转到登录页
+    window.location.href = '/login';
+  }
+  throw error;
+});
+
+// 需要时移除拦截器
+removeRequestInterceptor();
+```
+
+### 请求取消
+
+```ts
+import apiClient from './openapi';
+
+// 创建 abort controller
+const controller = new AbortController();
+
+// 传递 signal 到请求
+apiClient('/users', 'get', {
+  requestConfig: {
+    signal: controller.signal
+  }
+});
+
+// 取消请求
+controller.abort();
+
+// 示例：组件卸载时取消请求（React）
+useEffect(() => {
+  const controller = new AbortController();
+  
+  apiClient('/users', 'get', {
+    requestConfig: { signal: controller.signal }
+  });
+  
+  return () => controller.abort();
+}, []);
+```
+
+### 超时控制
+
+```ts
+import apiClient, { config } from './openapi';
+
+// 设置全局超时（默认：30000ms）
+config.timeout = 10000; // 10 秒
+
+// 或者为单个请求设置超时
+apiClient('/users', 'get', {
+  requestConfig: {
+    timeout: 5000 // 此请求 5 秒超时
+  }
+});
+```
+
+### 自动重试
+
+```ts
+// 简单重试：重试 3 次
+apiClient('/users', 'get', {
+  requestConfig: {
+    retry: 3
+  }
+});
+
+// 高级重试，自定义策略
+apiClient('/users', 'post', {
+  body: { name: 'John' },
+  requestConfig: {
+    retry: {
+      times: 3,
+      delay: 1000, // 重试间隔 1 秒
+      retryOn: (error) => {
+        // 仅在 5xx 服务器错误时重试
+        return error.status >= 500;
+      }
+    }
+  }
+});
+```
+
+### 全局错误处理器
+
+```ts
+import { setErrorHandler } from './openapi';
+
+// 设置全局错误处理函数
+setErrorHandler((error) => {
+  // 显示 toast 提示
+  toast.error(error.message);
+  
+  // 上报到错误追踪服务
+  errorTracker.log(error);
+});
+
+// 现在所有错误都会被全局处理
+apiClient('/users', 'get'); // 错误会自动处理
+```
+
+### 文件上传自动转换 FormData
+
+```ts
+// 客户端自动检测 File/Blob 并转换为 FormData
+const fileInput = document.querySelector('input[type="file"]');
+
+apiClient('/upload', 'post', {
+  body: {
+    file: fileInput.files[0],     // File 对象
+    username: 'John',              // 普通字段
+    metadata: { tags: ['photo'] }  // 对象会被 JSON 字符串化
+  }
+  // 自动转换为 FormData
+  // Content-Type 自动设置为 multipart/form-data
+});
+
+// 多文件上传
+apiClient('/upload-multiple', 'post', {
+  body: {
+    files: fileInput.files,  // FileList
+    userId: '123'
+  }
+});
+```
+
+### 完整示例
+
+```ts
+import apiClient, { config, interceptors, setErrorHandler } from './openapi';
+
+// 全局配置
+config.baseUrl = 'https://api.example.com';
+config.timeout = 15000;
+
+// 添加认证
+interceptors.request.use(async (config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// 处理 token 刷新
+interceptors.error.use(async (error) => {
+  if (error.status === 401) {
+    await refreshToken();
+    // 重试请求
+  }
+  throw error;
+});
+
+// 全局错误处理
+setErrorHandler((error) => {
+  if (error.status === 0) {
+    toast.error('网络错误，请检查您的网络连接。');
+  } else {
+    toast.error(error.message);
+  }
+});
+
+// 使用所有功能发起请求
+const controller = new AbortController();
+
+const { data } = await apiClient('/users', 'get', {
+  query: { page: 1 },
+  requestConfig: {
+    timeout: 5000,
+    retry: 3,
+    signal: controller.signal
+  }
+});
+```
 
 ## 生成的文件
 

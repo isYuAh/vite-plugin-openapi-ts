@@ -61,6 +61,8 @@ export function mapOpenAPITypeToTS(openapiType: string, format?: string): string
       switch (format) {
         case 'binary':
           return 'Blob';
+        case 'byte':
+          return 'string';
         default:
           return 'string';
       }
@@ -314,10 +316,13 @@ export function parseRequestBody(requestBody: { content: Record<string, any> }, 
       if (contentType === 'application/json') {
         const paramType = inferType(content.schema, schemas);
         return paramType;
-      } else if (contentType === 'application/x-www-form-urlencoded') {
-        return 'FormData';
-      } else if (contentType.startsWith('multipart/')) {
-        return 'FormData';
+      } else if (contentType === 'application/x-www-form-urlencoded' || contentType.startsWith('multipart/')) {
+        // 优先使用 schema 定义的类型，保留类型安全
+        if (content.schema) {
+          return inferType(content.schema, schemas);
+        }
+        // 没有 schema 时的兜底类型
+        return 'Record<string, string | Blob | File>';
       }
     }
   }
@@ -401,7 +406,210 @@ export let config = {
   baseUrl: "${base}" as ServerUrl,
   headers: {
     "Content-Type": "application/json"
+  },
+  timeout: 30000, // 默认 30 秒超时
+}
+
+/**
+ * 拦截器类型定义
+ */
+type RequestInterceptor = (config: RequestConfig) => RequestConfig | Promise<RequestConfig>;
+type ResponseInterceptor = (response: ApiResponse<any>) => ApiResponse<any> | Promise<ApiResponse<any>>;
+type ErrorInterceptor = (error: ApiError) => Promise<never>;
+
+interface RequestConfig {
+  url: URL;
+  method: string;
+  headers: Record<string, string>;
+  body?: any;
+  signal?: AbortSignal;
+}
+
+/**
+ * 拦截器管理器
+ */
+class InterceptorManager<T> {
+  private interceptors: T[] = [];
+
+  use(interceptor: T): () => void {
+    this.interceptors.push(interceptor);
+    // 返回取消函数
+    return () => {
+      const index = this.interceptors.indexOf(interceptor);
+      if (index !== -1) {
+        this.interceptors.splice(index, 1);
+      }
+    };
   }
+
+  forEach(fn: (interceptor: T) => void): void {
+    this.interceptors.forEach(fn);
+  }
+
+  clear(): void {
+    this.interceptors = [];
+  }
+}
+
+/**
+ * 拦截器实例
+ */
+export const interceptors = {
+  request: new InterceptorManager<RequestInterceptor>(),
+  response: new InterceptorManager<ResponseInterceptor>(),
+  error: new InterceptorManager<ErrorInterceptor>(),
+};
+
+/**
+ * 全局错误处理钩子
+ */
+export let onError: ((error: ApiError) => void) | null = null;
+
+/**
+ * 设置全局错误处理函数
+ */
+export function setErrorHandler(handler: (error: ApiError) => void): void {
+  onError = handler;
+}
+
+/**
+ * 检测对象是否包含 File/Blob，需要使用 FormData
+ */
+function shouldUseFormData(body: any): boolean {
+  if (!body || typeof body !== 'object') return false;
+  
+  return Object.values(body).some(value => 
+    value instanceof File || 
+    value instanceof Blob || 
+    value instanceof FileList ||
+    (Array.isArray(value) && value.some(v => v instanceof File || v instanceof Blob))
+  );
+}
+
+/**
+ * 将对象转换为 FormData
+ */
+function toFormData(body: Record<string, any>): FormData {
+  const formData = new FormData();
+  
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    
+    if (value instanceof FileList) {
+      Array.from(value).forEach(file => formData.append(key, file));
+    } else if (Array.isArray(value)) {
+      value.forEach(item => {
+        if (item instanceof File || item instanceof Blob) {
+          formData.append(key, item);
+        } else {
+          formData.append(key, String(item));
+        }
+      });
+    } else if (value instanceof File || value instanceof Blob) {
+      formData.append(key, value);
+    } else if (typeof value === 'object') {
+      formData.append(key, JSON.stringify(value));
+    } else {
+      formData.append(key, String(value));
+    }
+  }
+  
+  return formData;
+}
+
+/**
+ * 延迟函数
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 带重试的 fetch 函数
+ */
+async function fetchWithRetry(
+  url: URL,
+  configs: RequestInit,
+  retryConfig?: number | {
+    times: number;
+    delay: number;
+    retryOn?: (error: ApiError) => boolean;
+  }
+): Promise<Response> {
+  if (!retryConfig) {
+    return fetch(url, configs);
+  }
+
+  const times = typeof retryConfig === 'number' ? retryConfig : retryConfig.times;
+  const retryDelay = typeof retryConfig === 'number' ? 1000 : retryConfig.delay;
+  const retryOn = typeof retryConfig === 'number' 
+    ? undefined 
+    : retryConfig.retryOn;
+
+  let lastError: any;
+
+  for (let attempt = 0; attempt <= times; attempt++) {
+    try {
+      const response = await fetch(url, configs);
+
+      if (response.ok) {
+        return response;
+      }
+
+      // 构造错误对象
+      const contentType = response.headers.get('content-type');
+      let errorData: any;
+      try {
+        if (contentType?.includes('application/json')) {
+          errorData = await response.clone().json();
+        } else if (contentType?.includes('text/')) {
+          errorData = await response.clone().text();
+        } else {
+          errorData = await response.clone().text();
+        }
+      } catch (e) {
+        errorData = null;
+      }
+
+      const error = new ApiError(
+        \`API request failed: \${response.status} \${response.statusText}\`,
+        response.status,
+        response,
+        errorData
+      );
+
+      // 判断是否需要重试
+      const shouldRetry = retryOn
+        ? retryOn(error)
+        : (response.status >= 500 || response.status === 408 || response.status === 429);
+
+      if (!shouldRetry || attempt === times) {
+        throw error;
+      }
+
+      lastError = error;
+      await delay(retryDelay * (attempt + 1));
+
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (attempt === times) {
+          throw error;
+        }
+        lastError = error;
+      } else {
+        // 网络错误等，尝试重试
+        if (attempt === times) {
+          throw error;
+        }
+        lastError = error;
+      }
+      await delay(retryDelay * (attempt + 1));
+    }
+  }
+
+  throw lastError;
 }
 
 /**
@@ -417,7 +625,7 @@ export const buildPath = (template: string, params: Record<string, any>): string
     if (seg.startsWith("{") && seg.endsWith("}")) {
       const paramName = seg.slice(1, -1);
       // 移除可能的前缀 * 或 **
-      const cleanName = paramName.replace(/^\*+/, '');
+      const cleanName = paramName.replace(/^\\\*+/, '');
       return params[cleanName] ?? seg;
     }
     // 处理 Express/Koa 风格 :paramName
@@ -427,7 +635,7 @@ export const buildPath = (template: string, params: Record<string, any>): string
     }
     // 处理通配符 *paramName 或 **paramName
     if (seg.startsWith("*")) {
-      const paramName = seg.replace(/^\*+/, '');
+      const paramName = seg.replace(/^\\\*+/, '');
       return params[paramName] ?? seg;
     }
     return seg;
@@ -472,6 +680,19 @@ export type ApiClientOptions<
   & {
     baseUrl?: ServerUrl;
     headers?: Record<string, string>;
+    /** 请求行为配置 */
+    requestConfig?: {
+      /** 超时时间（毫秒），默认 30000 */
+      timeout?: number;
+      /** 自定义取消信号 */
+      signal?: AbortSignal;
+      /** 重试配置 */
+      retry?: number | {
+        times: number;
+        delay: number;
+        retryOn?: (error: ApiError) => boolean;
+      };
+    };
   };
 
 type IsOptionsRequired<
@@ -501,14 +722,15 @@ export default async function apiClient<
     cookie = {},
     body = {}, 
     baseUrl = config.baseUrl,
-    headers = config.headers
+    headers = config.headers,
+    requestConfig = {}
   } = options || {};
   
   const url = new URL(buildPath(path as string, params as any), baseUrl)
   url.search = new URLSearchParams(query as any).toString();
   
   // 合并默认 headers 和参数中的 headers
-  const mergedHeaders = { ...headers };
+  const mergedHeaders: any = { ...headers };
   for (const [key, value] of Object.entries(header as any)) {
     mergedHeaders[key] = String(value);
   }
@@ -525,49 +747,123 @@ export default async function apiClient<
     }
   }
   
-  const configs: any = {
+  // 处理请求体：自动检测是否需要 FormData
+  let processedBody: any;
+  if (method !== 'get' && method !== 'head') {
+    if (shouldUseFormData(body)) {
+      processedBody = toFormData(body as Record<string, any>);
+      // 删除 Content-Type，让浏览器自动设置（包含 boundary）
+      delete mergedHeaders['Content-Type'];
+    } else {
+      processedBody = JSON.stringify(body);
+    }
+  }
+  
+  // 处理超时和取消
+  const timeout = requestConfig.timeout ?? config.timeout;
+  const controller = new AbortController();
+  const signal = requestConfig.signal || controller.signal;
+  
+  let timeoutId: any;
+  if (timeout) {
+    timeoutId = setTimeout(() => controller.abort(), timeout);
+  }
+  
+  // 构建请求配置
+  let requestCfg: RequestConfig = {
+    url,
     method,
     headers: mergedHeaders,
+    body: processedBody,
+    signal
   };
-  if (method !== 'get' && method !== 'head') {
-    configs['body'] = JSON.stringify(body);
-  }
-  const response = await fetch(url, configs);
   
-  if (!response.ok) {
-    const contentType = response.headers.get('content-type');
-    let errorData: any;
-    try {
-      if (contentType?.includes('application/json')) {
-        errorData = await response.json();
-      } else if (contentType?.includes('text/')) {
-        errorData = await response.text();
-      } else {
-        errorData = await response.text();
+  // 执行请求拦截器
+  for (const interceptor of (interceptors.request as any).interceptors) {
+    requestCfg = await interceptor(requestCfg);
+  }
+  
+  const fetchConfigs: RequestInit = {
+    method: requestCfg.method,
+    headers: requestCfg.headers,
+    body: requestCfg.body,
+    signal: requestCfg.signal,
+  };
+  
+  try {
+    // 发送请求（支持重试）
+    const response = await fetchWithRetry(requestCfg.url, fetchConfigs, requestConfig.retry);
+    
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const contentType = response.headers.get('content-type');
+      let errorData: any;
+      try {
+        if (contentType?.includes('application/json')) {
+          errorData = await response.json();
+        } else if (contentType?.includes('text/')) {
+          errorData = await response.text();
+        } else {
+          errorData = await response.text();
+        }
+      } catch (e) {
+        errorData = null;
       }
-    } catch (e) {
-      errorData = null;
+      throw new ApiError(
+        \`API request failed: \${response.status} \${response.statusText}\`,
+        response.status,
+        response,
+        errorData
+      );
     }
-    throw new ApiError(
-      \`API request failed: \${response.status} \${response.statusText}\`,
-      response.status,
-      response,
-      errorData
-    );
+    
+    // 解析响应数据
+    const contentType = response.headers.get('content-type')
+    let data: any;
+    if (contentType?.includes('application/json')) {
+      data = await response.json()
+    } else if (contentType?.includes('text/')) {
+      data = await response.text()
+    } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
+      data = await response.blob()
+    } else {
+      data = await response.json()
+    }
+    
+    let result: ApiResponse<any> = { data, response };
+    
+    // 执行响应拦截器
+    for (const interceptor of (interceptors.response as any).interceptors) {
+      result = await interceptor(result);
+    }
+    
+    return result;
+    
+  } catch (error) {
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    const apiError = error instanceof ApiError 
+      ? error 
+      : new ApiError(
+          error instanceof Error ? error.message : String(error),
+          0,
+          null as any,
+          null
+        );
+    
+    // 执行错误拦截器
+    for (const interceptor of (interceptors.error as any).interceptors) {
+      await interceptor(apiError);
+    }
+    
+    // 执行全局错误处理
+    if (onError) {
+      onError(apiError);
+    }
+    
+    throw apiError;
   }
-  
-  const contentType = response.headers.get('content-type')
-  let data: any;
-  if (contentType?.includes('application/json')) {
-    data = await response.json()
-  } else if (contentType?.includes('text/')) {
-    data = await response.text()
-  } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
-    data = await response.blob()
-  } else {
-    data = await response.json()
-  }
-  return { data, response };
 }
 `;
 }
