@@ -726,7 +726,11 @@ export default async function apiClient<
     requestConfig = {}
   } = options || {};
   
-  const url = new URL(buildPath(path as string, params as any), baseUrl)
+  // 处理路径拼接：如果 path 以 / 开头，需要去掉以正确拼接到 baseUrl
+  const builtPath = buildPath(path as string, params as any);
+  const relativePath = builtPath.startsWith('/') ? builtPath.slice(1) : builtPath;
+  const fullUrl = baseUrl.endsWith('/') ? baseUrl + relativePath : baseUrl + '/' + relativePath;
+  const url = new URL(fullUrl);
   url.search = new URLSearchParams(query as any).toString();
   
   // 合并默认 headers 和参数中的 headers
