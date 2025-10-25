@@ -19,9 +19,21 @@ export interface PluginOptions {
 export default function openapiPlugin(options: PluginOptions): Plugin {
   const {
     url,
-    baseUrl = 'http://localhost:8080',
     outputDir = 'src/openapi'
   } = options;
+
+  // 从 URL 中提取 baseUrl (协议 + 域名 + 端口)
+  const extractBaseUrl = (urlString: string): string => {
+    try {
+      const urlObj = new URL(urlString);
+      return `${urlObj.protocol}//${urlObj.host}`;
+    } catch (error) {
+      console.warn(pc.yellow(`[openapi-ts] Failed to extract baseUrl from URL "${urlString}", using default: http://localhost:8080`));
+      return 'http://localhost:8080';
+    }
+  };
+
+  const baseUrl = options.baseUrl ?? extractBaseUrl(url);
 
   return {
     name: 'vite-plugin-openapi-ts',
