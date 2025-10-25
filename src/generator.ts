@@ -333,8 +333,10 @@ export function genClient(base: string, servers: string[]): string {
     : 'string';
     
   return `
+export type ServerUrl = ${serverTypes};
+
 export let config = {
-  baseUrl: "${base}" as ${serverTypes},
+  baseUrl: "${base}" as ServerUrl,
   headers: {
     "Content-Type": "application/json"
   }
@@ -391,7 +393,7 @@ export type ApiClientOptions<
   & OptionalIfEmpty<'params', ExtractParams<API_Endpoints[T][M], 'pathParams'>>
   & OptionalIfEmpty<'body', ExtractParams<API_Endpoints[T][M], 'bodyParams'>>
   & {
-    baseUrl?: string;
+    baseUrl?: ServerUrl;
     headers?: Record<string, string>;
   };
 
