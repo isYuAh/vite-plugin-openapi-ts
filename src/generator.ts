@@ -328,12 +328,11 @@ export function genPaths(endpoints: OpenapiPaths, schemas: OpenAPIScheme): strin
  * 生成 API 客户端代码
  */
 export function genClient(base: string, servers: string[]): string {
-  const serverTypes = servers.length > 0 
-    ? servers.map(s => `'${s}'`).join(' | ') + ' | string'
-    : 'string';
+  const allServers = Array.from(new Set([base, ...servers]));
+  const serverLiterals = allServers.map(s => `'${s}'`).join(' | ');
     
   return `
-export type ServerUrl = ${serverTypes};
+export type ServerUrl = ${serverLiterals} | (string & {});
 
 export let config = {
   baseUrl: "${base}" as ServerUrl,
