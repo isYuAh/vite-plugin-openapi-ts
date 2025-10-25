@@ -1,0 +1,50 @@
+{
+  "name": "vite-plugin-openapi-ts",
+  "version": "1.0.1",
+  "description": "A Vite plugin to generate TypeScript types and API client from OpenAPI specification",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepublishOnly": "pnpm build"
+  },
+  "keywords": [
+    "vite",
+    "plugin",
+    "openapi",
+    "typescript",
+    "codegen",
+    "api-client",
+    "swagger"
+  ],
+  "author": "",
+  "license": "MIT",
+  "peerDependencies": {
+    "vite": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  },
+  "packageManager": "pnpm@10.12.4",
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  }
+}
