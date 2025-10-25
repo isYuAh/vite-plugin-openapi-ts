@@ -57,7 +57,7 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
   /**
    * 读取缓存
    */
-  const readCache = (cachePath: string): { hash: string; timestamp: number } | null => {
+  const readCache = (cachePath: string): { hash: string; timestamp: number, baseUrl: string, url: string } | null => {
     try {
       if (fs.existsSync(cachePath)) {
         const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
@@ -77,7 +77,8 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
       fs.writeFileSync(cachePath, JSON.stringify({
         hash,
         timestamp: Date.now(),
-        url
+        url,
+        baseUrl,
       }, null, 2));
     } catch (error) {
       // 写入缓存失败不影响主流程
@@ -115,7 +116,7 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
         // 检查缓存
         if (enableCache) {
           const cache = readCache(cachePath);
-          if (cache && cache.hash === specHash) {
+          if (cache && cache.hash === specHash && cache.baseUrl === baseUrl && cache.url === url) {
             // 验证生成的文件是否存在
             const schemesPath = path.join(outputPath, 'schemes.ts');
             const indexPath = path.join(outputPath, 'index.ts');
