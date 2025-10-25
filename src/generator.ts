@@ -374,16 +374,35 @@ export class ApiError extends Error {
   }
 }
 
-export interface ApiClientOptions<
+type IsEmptyOrAllOptional<T> = {} extends T ? true : false;
+
+type ExtractParams<T, K extends string> = T extends {[key in K]: infer P} ? P : {};
+
+// 根据是否有必填字段决定该字段是必填还是可选
+type OptionalIfEmpty<K extends string, T> = IsEmptyOrAllOptional<T> extends true 
+  ? { [P in K]?: T } 
+  : { [P in K]: T };
+
+export type ApiClientOptions<
   T extends keyof API_Endpoints,
   M extends keyof API_Endpoints[T] & string
-> {
-  query?: API_Endpoints[T][M] extends {queryParams: infer Q} ? Q : never;
-  params?: API_Endpoints[T][M] extends {pathParams: infer P} ? P : never;
-  body?: API_Endpoints[T][M] extends {bodyParams: infer B} ? B : never;
-  baseUrl?: string;
-  headers?: Record<string, string>;
-}
+> = 
+  & OptionalIfEmpty<'query', ExtractParams<API_Endpoints[T][M], 'queryParams'>>
+  & OptionalIfEmpty<'params', ExtractParams<API_Endpoints[T][M], 'pathParams'>>
+  & OptionalIfEmpty<'body', ExtractParams<API_Endpoints[T][M], 'bodyParams'>>
+  & {
+    baseUrl?: string;
+    headers?: Record<string, string>;
+  };
+
+type IsOptionsRequired<
+  T extends keyof API_Endpoints,
+  M extends keyof API_Endpoints[T] & string
+> = 
+  IsEmptyOrAllOptional<ExtractParams<API_Endpoints[T][M], 'queryParams'>> extends false ? true :
+  IsEmptyOrAllOptional<ExtractParams<API_Endpoints[T][M], 'pathParams'>> extends false ? true :
+  IsEmptyOrAllOptional<ExtractParams<API_Endpoints[T][M], 'bodyParams'>> extends false ? true :
+  false;
 
 export default async function apiClient<
   T extends keyof API_Endpoints,
@@ -391,8 +410,9 @@ export default async function apiClient<
 >(
   path: T,
   method: M,
-  options?: ApiClientOptions<T, M>
+  ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
 ): Promise<ApiResponse<API_Endpoints[T][M] extends {responses: {200: infer R}} ? R : any>> {
+  const options = args[0];
   const { 
     query = {}, 
     params = {}, 
