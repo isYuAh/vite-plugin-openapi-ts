@@ -38,6 +38,7 @@
     "vite": ">=4.0.0"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.9.1",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
@@ -45,6 +46,7 @@
   },
   "packageManager": "pnpm@10.12.4",
   "dependencies": {
+    "js-yaml": "^4.1.0",
     "picocolors": "^1.1.1"
   }
 }

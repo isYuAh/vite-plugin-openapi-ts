@@ -2,10 +2,11 @@ import { type Plugin } from 'vite';
 import fs from 'fs';
 import path from 'path';
 import pc from 'picocolors';
+import yaml from 'js-yaml';
 import { genSchemes, summary } from './generator';
 
 export interface PluginOptions {
-  /** OpenAPI specification URL */
+  /** OpenAPI specification URL (supports both JSON and YAML formats) */
   url: string;
   /** API base URL for the generated client */
   baseUrl?: string;
@@ -42,11 +43,40 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
       try {
         this.info(pc.cyan(`[openapi-ts] Fetching OpenAPI spec from ${pc.dim(url)}`));
         
-        const openapi: any = await fetch(url).then(res => {
+        // 检测是否为 YAML 格式
+        const isYaml = url.endsWith('.yaml') || url.endsWith('.yml');
+        
+        const openapi: any = await fetch(url).then(async res => {
           if (!res.ok) {
             throw new Error(`Failed to fetch OpenAPI spec: ${res.status} ${res.statusText}`);
           }
-          return res.json();
+          
+          const text = await res.text();
+          const contentType = res.headers.get('content-type') || '';
+          
+          // 优先使用 Content-Type，其次使用 URL 扩展名
+          const shouldParseAsYaml = contentType.includes('yaml') || 
+                                    contentType.includes('yml') || 
+                                    isYaml;
+          
+          try {
+            // 根据检测结果解析
+            if (shouldParseAsYaml) {
+              this.info(pc.dim('[openapi-ts] Parsing as YAML format'));
+              return yaml.load(text);
+            } else {
+              this.info(pc.dim('[openapi-ts] Parsing as JSON format'));
+              return JSON.parse(text);
+            }
+          } catch (parseError) {
+            // 如果解析失败，尝试另一种格式（智能回退）
+            this.warn(pc.yellow(`[openapi-ts] Failed to parse as ${shouldParseAsYaml ? 'YAML' : 'JSON'}, trying alternative format...`));
+            try {
+              return shouldParseAsYaml ? JSON.parse(text) : yaml.load(text);
+            } catch (fallbackError) {
+              throw new Error(`Failed to parse OpenAPI spec: ${parseError}`);
+            }
+          }
         });
         
         const schemes = openapi.components?.schemas || {};
