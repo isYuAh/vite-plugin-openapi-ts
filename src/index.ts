@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import pc from 'picocolors';
 import yaml from 'js-yaml';
+import { createHash } from 'crypto';
 import { genSchemes, summary } from './generator';
 
 export interface PluginOptions {
@@ -12,6 +13,8 @@ export interface PluginOptions {
   baseUrl?: string;
   /** Output directory relative to project root */
   outputDir?: string;
+  /** Enable cache to skip regeneration if spec hasn't changed (default: true) */
+  enableCache?: boolean;
 }
 
 /**
@@ -20,7 +23,8 @@ export interface PluginOptions {
 export default function openapiPlugin(options: PluginOptions): Plugin {
   const {
     url,
-    outputDir = 'src/openapi'
+    outputDir = 'src/openapi',
+    enableCache = true
   } = options;
 
   // 从 URL 中提取 baseUrl (协议 + 域名 + 端口)
@@ -36,6 +40,50 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
 
   const baseUrl = options.baseUrl ?? extractBaseUrl(url);
 
+  /**
+   * 计算内容的 hash 值
+   */
+  const calculateHash = (content: string): string => {
+    return createHash('sha256').update(content).digest('hex');
+  };
+
+  /**
+   * 获取缓存文件路径
+   */
+  const getCachePath = (outputPath: string): string => {
+    return path.join(outputPath, '.openapi-cache.json');
+  };
+
+  /**
+   * 读取缓存
+   */
+  const readCache = (cachePath: string): { hash: string; timestamp: number } | null => {
+    try {
+      if (fs.existsSync(cachePath)) {
+        const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+        return cache;
+      }
+    } catch (error) {
+      // 缓存文件损坏或无效，忽略
+    }
+    return null;
+  };
+
+  /**
+   * 写入缓存
+   */
+  const writeCache = (cachePath: string, hash: string): void => {
+    try {
+      fs.writeFileSync(cachePath, JSON.stringify({
+        hash,
+        timestamp: Date.now(),
+        url
+      }, null, 2));
+    } catch (error) {
+      // 写入缓存失败不影响主流程
+    }
+  };
+
   return {
     name: 'vite-plugin-openapi-ts',
     
@@ -46,48 +94,70 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
         // 检测是否为 YAML 格式
         const isYaml = url.endsWith('.yaml') || url.endsWith('.yml');
         
-        const openapi: any = await fetch(url).then(async res => {
-          if (!res.ok) {
-            throw new Error(`Failed to fetch OpenAPI spec: ${res.status} ${res.statusText}`);
-          }
-          
-          const text = await res.text();
-          const contentType = res.headers.get('content-type') || '';
-          
-          // 优先使用 Content-Type，其次使用 URL 扩展名
-          const shouldParseAsYaml = contentType.includes('yaml') || 
-                                    contentType.includes('yml') || 
-                                    isYaml;
-          
-          try {
-            // 根据检测结果解析
-            if (shouldParseAsYaml) {
-              this.info(pc.dim('[openapi-ts] Parsing as YAML format'));
-              return yaml.load(text);
-            } else {
-              this.info(pc.dim('[openapi-ts] Parsing as JSON format'));
-              return JSON.parse(text);
-            }
-          } catch (parseError) {
-            // 如果解析失败，尝试另一种格式（智能回退）
-            this.warn(pc.yellow(`[openapi-ts] Failed to parse as ${shouldParseAsYaml ? 'YAML' : 'JSON'}, trying alternative format...`));
-            try {
-              return shouldParseAsYaml ? JSON.parse(text) : yaml.load(text);
-            } catch (fallbackError) {
-              throw new Error(`Failed to parse OpenAPI spec: ${parseError}`);
-            }
-          }
-        });
+        // 获取 OpenAPI spec 内容
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch OpenAPI spec: ${response.status} ${response.statusText}`);
+        }
         
-        const schemes = openapi.components?.schemas || {};
-        const paths = openapi.paths || {};
-        const servers: string[] = (openapi.servers || []).map((server: any) => server.url);
+        const specText = await response.text();
         
         // 确保输出目录存在
         const outputPath = path.resolve(process.cwd(), outputDir);
         if (!fs.existsSync(outputPath)) {
           fs.mkdirSync(outputPath, { recursive: true });
         }
+        
+        // 计算 spec 的 hash
+        const specHash = calculateHash(specText);
+        const cachePath = getCachePath(outputPath);
+        
+        // 检查缓存
+        if (enableCache) {
+          const cache = readCache(cachePath);
+          if (cache && cache.hash === specHash) {
+            // 验证生成的文件是否存在
+            const schemesPath = path.join(outputPath, 'schemes.ts');
+            const indexPath = path.join(outputPath, 'index.ts');
+            
+            if (fs.existsSync(schemesPath) && fs.existsSync(indexPath)) {
+              this.info(pc.green(`[openapi-ts] Cache hit, skipping generation (hash: ${pc.dim(specHash.slice(0, 8))})`));
+              return;
+            } else {
+              this.warn(pc.yellow(`[openapi-ts] Cache found but generated files missing, regenerating...`));
+            }
+          }
+        }
+        
+        // 解析 OpenAPI spec
+        const contentType = response.headers.get('content-type') || '';
+        const shouldParseAsYaml = contentType.includes('yaml') || 
+                                  contentType.includes('yml') || 
+                                  isYaml;
+        
+        let openapi: any;
+        try {
+          // 根据检测结果解析
+          if (shouldParseAsYaml) {
+            this.info(pc.dim('[openapi-ts] Parsing as YAML format'));
+            openapi = yaml.load(specText);
+          } else {
+            this.info(pc.dim('[openapi-ts] Parsing as JSON format'));
+            openapi = JSON.parse(specText);
+          }
+        } catch (parseError) {
+          // 如果解析失败，尝试另一种格式（智能回退）
+          this.warn(pc.yellow(`[openapi-ts] Failed to parse as ${shouldParseAsYaml ? 'YAML' : 'JSON'}, trying alternative format...`));
+          try {
+            openapi = shouldParseAsYaml ? JSON.parse(specText) : yaml.load(specText);
+          } catch (fallbackError) {
+            throw new Error(`Failed to parse OpenAPI spec: ${parseError}`);
+          }
+        }
+        
+        const schemes = openapi.components?.schemas || {};
+        const paths = openapi.paths || {};
+        const servers: string[] = (openapi.servers || []).map((server: any) => server.url);
         
         // 生成 schemes.ts
         fs.writeFileSync(
@@ -104,6 +174,11 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
         );
         
         this.info(pc.green(`[openapi-ts] Generated ${pc.bold(outputDir + '/schemes.ts')} and ${pc.bold(outputDir + '/index.ts')}`));
+        
+        // 写入缓存
+        if (enableCache) {
+          writeCache(cachePath, specHash);
+        }
         
       } catch (error) {
         this.error(pc.red(`[openapi-ts] Failed to generate types: ${error}`));
