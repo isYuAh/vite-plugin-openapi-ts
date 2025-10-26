@@ -7,7 +7,7 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "openapi-ts": "./dist/src/cli/index.js"
+    "openapi-ts": "./dist/cli.js"
   },
   "exports": {
     ".": {
