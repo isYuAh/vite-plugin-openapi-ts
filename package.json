@@ -6,6 +6,9 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "openapi-ts": "./dist/src/cli/index.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -46,6 +49,7 @@
   },
   "packageManager": "pnpm@10.12.4",
   "dependencies": {
+    "commander": "^14.0.2",
     "js-yaml": "^4.1.0",
     "picocolors": "^1.1.1"
   }

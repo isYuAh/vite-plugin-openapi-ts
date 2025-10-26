@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import pc from 'picocolors';
 import yaml from 'js-yaml';
-import { createHash } from 'crypto';
-import { genSchemes, summary } from './generator';
+import { calculateHash } from './shared/utils'
+import { genSchemes, summary } from './shared/generator';
+
+const CONFIG_FILENAME = 'openapi.config.json';
 
 export interface PluginOptions {
   /** OpenAPI specification URL (supports both JSON and YAML formats) */
@@ -22,7 +24,18 @@ export interface PluginOptions {
 /**
  * Vite plugin to generate TypeScript types and API client from OpenAPI specification
  */
-export default function openapiPlugin(options: PluginOptions): Plugin {
+export default function openapiPlugin(options?: PluginOptions): Plugin {
+
+  // 如果没有传入 options，则尝试从配置文件加载
+  if (!options) {
+    if (fs.existsSync(CONFIG_FILENAME)) {
+      const configContent = fs.readFileSync(CONFIG_FILENAME, 'utf-8');
+      options = JSON.parse(configContent) as PluginOptions;
+    } else {
+      throw new Error(`[openapi-ts] Plugin options are required if ${CONFIG_FILENAME} is not present.`);
+    }
+  }
+  
   const {
     url,
     outputDir = 'src/openapi',
@@ -43,12 +56,7 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
 
   const baseUrl = options.baseUrl ?? extractBaseUrl(url);
 
-  /**
-   * 计算内容的 hash 值
-   */
-  const calculateHash = (content: string): string => {
-    return createHash('sha256').update(content).digest('hex');
-  };
+
 
   /**
    * 获取缓存文件路径
@@ -191,7 +199,6 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
         
       } catch (error) {
         this.error(pc.red(`[openapi-ts] Failed to generate types: ${error}`));
-        throw error;
       }
     }
   };
