@@ -28,11 +28,13 @@ export default function openapiPlugin(options?: PluginOptions): Plugin {
 
   // 如果没有传入 options，则尝试从配置文件加载
   if (!options) {
-    if (fs.existsSync(CONFIG_FILENAME)) {
-      const configContent = fs.readFileSync(CONFIG_FILENAME, 'utf-8');
+    const config_path = path.resolve(process.cwd(), CONFIG_FILENAME);
+    if (fs.existsSync(config_path)) {
+      const configContent = fs.readFileSync(config_path, 'utf-8');
       options = JSON.parse(configContent) as PluginOptions;
     } else {
-      throw new Error(`[openapi-ts] Plugin options are required if ${CONFIG_FILENAME} is not present.`);
+      console.warn(pc.yellow(`[openapi-ts] No configuration provided and ${CONFIG_FILENAME} not found. Plugin will be inactive.`));
+      return { name: 'vite-plugin-openapi-ts' };
     }
   }
   

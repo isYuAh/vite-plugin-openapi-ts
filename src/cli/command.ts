@@ -63,9 +63,10 @@ export const generateCommand = new Command("generate")
   .action(async (options) => {
     let config: any;
     if (!options.url) {
-      if (fs.existsSync("openapi.config.json")) {
-        const configContent = fs.readFileSync("openapi.config.json", "utf-8");
-        const config = JSON.parse(configContent);
+      const config_path  = path.resolve(process.cwd(), "openapi.config.json");
+      if (fs.existsSync(config_path)) {
+        const configContent = fs.readFileSync(config_path, "utf-8");
+        config = JSON.parse(configContent);
       }
       console.log(pc.red("[openapi-ts] Specification URL is required. Use -u or --url to specify it."));
       process.exit(1);
