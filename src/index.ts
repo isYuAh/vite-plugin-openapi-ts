@@ -15,6 +15,8 @@ export interface PluginOptions {
   outputDir?: string;
   /** Enable cache to skip regeneration if spec hasn't changed (default: true) */
   enableCache?: boolean;
+  /** Timeout in milliseconds to skip regeneration if url hasn't changed (default: 0) */
+  skipTimeout?: number;
 }
 
 /**
@@ -24,7 +26,8 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
   const {
     url,
     outputDir = 'src/openapi',
-    enableCache = true
+    enableCache = true,
+    skipTimeout = 0,
   } = options;
 
   // 从 URL 中提取 baseUrl (协议 + 域名 + 端口)
@@ -91,7 +94,19 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
     async buildStart() {
       try {
         this.info(pc.cyan(`[openapi-ts] Fetching OpenAPI spec from ${pc.dim(url)}`));
-        
+        const outputPath = path.resolve(process.cwd(), outputDir);
+        if (!fs.existsSync(outputPath)) {
+          fs.mkdirSync(outputPath, { recursive: true });
+        }
+        const cachePath = getCachePath(outputPath);
+        if (skipTimeout > 0 && enableCache) {
+          const cache = readCache(cachePath);
+          if (cache && cache.url === url && cache.baseUrl === baseUrl && (Date.now() - cache.timestamp) < skipTimeout) {
+            this.info(pc.green(`[openapi-ts] Skip timeout active, skipping generation (last generated: ${new Date(cache.timestamp).toLocaleString()})`));
+            return;
+          }
+        }
+
         // 检测是否为 YAML 格式
         const isYaml = url.endsWith('.yaml') || url.endsWith('.yml');
         
@@ -103,15 +118,8 @@ export default function openapiPlugin(options: PluginOptions): Plugin {
         
         const specText = await response.text();
         
-        // 确保输出目录存在
-        const outputPath = path.resolve(process.cwd(), outputDir);
-        if (!fs.existsSync(outputPath)) {
-          fs.mkdirSync(outputPath, { recursive: true });
-        }
-        
         // 计算 spec 的 hash
         const specHash = calculateHash(specText);
-        const cachePath = getCachePath(outputPath);
         
         // 检查缓存
         if (enableCache) {
