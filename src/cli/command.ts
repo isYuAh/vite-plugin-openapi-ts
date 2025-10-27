@@ -60,6 +60,7 @@ export const generateCommand = new Command("generate")
   .option("-o, --output-dir <outputDir>", "Output directory", DEFAULT_OUTPUT_DIR)
   .option("-c, --enable-cache", "Enable cache to skip regeneration if spec hasn't changed", true)
   .option("-t, --skip-timeout <timeout>", "Timeout in milliseconds to skip regeneration if url hasn't changed", "0")
+  .option("-f, --force", "Force regeneration by bypassing the cache", false)
   .action(async (options) => {
     let config: any;
     if (!options.url) {
@@ -76,10 +77,21 @@ export const generateCommand = new Command("generate")
       console.log(pc.red("[openapi-ts] Specification URL is required. Use -u or --url to specify it or provide in openapi.config.json"));
       process.exit(1);
     }
-    const baseUrl = options.baseUrl || config?.baseUrl || extractBaseUrl(specUrl);
+    const isRemote = specUrl.startsWith('http');
+    let baseUrl = options.baseUrl || config?.baseUrl;
+
+    if (!baseUrl) {
+      if (isRemote) {
+        baseUrl = extractBaseUrl(specUrl);
+      } else {
+        console.log(pc.red("[openapi-ts] Base URL is required for local spec files. Use -b or --base-url to specify it."));
+        process.exit(1);
+      }
+    }
     const outputDir = options.outputDir;
     const enableCache = options.enableCache;
     const skipTimeout = parseInt(options.skipTimeout, 10) || 0;
+    const force = options.force || config?.force || false;
     try {
       generate({
         url: specUrl,
@@ -87,6 +99,7 @@ export const generateCommand = new Command("generate")
         outputDir,
         enableCache,
         skipTimeout,
+        force,
       });
     } catch (error) {
       console.log(pc.red("[openapi-ts] Failed to generate types:"), error);

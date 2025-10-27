@@ -14,3 +14,5 @@ import { cleanCacheCommand } from "./command";
 program.addCommand(generateCommand);
 program.addCommand(cleanCommand);
 program.addCommand(cleanCacheCommand);
+
+program.parse(process.argv);

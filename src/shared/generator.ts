@@ -1,3 +1,14 @@
+import { resolveRef } from './utils';
+
+// Basic interface for the OpenAPI document to provide some type safety.
+interface OpenAPIDocument {
+  paths: OpenapiPaths;
+  components: {
+    schemas?: OpenAPIScheme;
+  };
+  servers?: { url: string }[];
+}
+
 export type OpenAPIScheme = Record<string, OpenAPISchemeObject>;
 
 export interface OpenAPISchemeObject {
@@ -48,7 +59,7 @@ export type ApiEndpoint = Record<HttpMethod, ApiEndpointDetail>;
 export type OpenapiPaths = Record<string, ApiEndpoint>;
 
 /**
- * 将 OpenAPI 类型映射为 TypeScript 类型
+ * Maps an OpenAPI type to a TypeScript type.
  */
 export function mapOpenAPITypeToTS(openapiType: string, format?: string): string {
   switch (openapiType) {
@@ -121,51 +132,62 @@ class ConstructType {
 }
 
 /**
- * 推断 OpenAPI schema 的 TypeScript 类型
- * 支持 OpenAPI 3.0 和 3.1 规范
+ * Infers a TypeScript type from an OpenAPI schema object.
+ * Supports OpenAPI 3.0 and 3.1 specifications.
  */
 export function inferType(
   schema: any,
-  schemas?: OpenAPIScheme,
+  openapi: OpenAPIDocument,
   useNamespace: boolean = true
 ): string {
   if (!schema) return 'any';
 
-  // 处理 $ref 引用
+  // Handle $ref references
   if (schema.$ref) {
-    const refPath = schema.$ref.split('/');
-    const refName = refPath[refPath.length - 1];
-    if (schema.$ref.includes('/components/schemas/')) {
+    // Priority for schemas, as they are pre-generated interfaces.
+    if (schema.$ref.startsWith('#/components/schemas/')) {
+      const refName = schema.$ref.substring('#/components/schemas/'.length);
       return useNamespace ? `Schemes.SCHEME_${refName}` : `SCHEME_${refName}`;
     }
-    return refName || 'any';
+
+    // For all other references, resolve them and infer their type recursively.
+    const resolvedComponent = resolveRef(schema.$ref, openapi);
+    if (resolvedComponent) {
+      return inferType(resolvedComponent, openapi, useNamespace);
+    } else {
+      console.warn(`[openapi-ts] Warning: Could not resolve $ref: ${schema.$ref}`);
+      return 'any';
+    }
   }
 
-  // 处理 allOf (交叉类型)
+  // --- The rest of the function logic remains largely the same, but recursive calls are updated ---
+
+  // Handle allOf (intersection types)
   if (schema.allOf) {
-    const types = schema.allOf.map((s: any) => inferType(s, schemas, useNamespace));
+    const types = schema.allOf.map((s: any) => inferType(s, openapi, useNamespace));
     return types.join(' & ');
   }
 
-  // 处理 oneOf/anyOf (联合类型)
+  // Handle oneOf/anyOf (union types)
   if (schema.oneOf || schema.anyOf) {
-    const types = (schema.oneOf || schema.anyOf).map((s: any) => inferType(s, schemas, useNamespace));
+    const types = (schema.oneOf || schema.anyOf).map((s: any) => inferType(s, openapi, useNamespace));
     return types.join(' | ');
   }
 
-  // OpenAPI 3.1: 支持 const 关键字（单一值枚举）
+  // OpenAPI 3.1: Support for the 'const' keyword (singleton enum)
   if (schema.const !== undefined) {
     return typeof schema.const === 'string' ? `'${schema.const}'` : String(schema.const);
   }
 
+  // From here, we need to ensure recursive calls to inferType pass the full openapi object.
   const type = schema.type;
   
-  // OpenAPI 3.1: 支持 type 为数组，如 type: ["string", "null"]
+  // OpenAPI 3.1: Support for type arrays, e.g., type: ["string", "null"]
   if (Array.isArray(type)) {
     const types = type.map(t => {
       if (t === 'null') return 'null';
       if (t === 'array') {
-        const itemType = schema.items ? inferType(schema.items, schemas, useNamespace) : 'any';
+        const itemType = schema.items ? inferType(schema.items, openapi, useNamespace) : 'any';
         return `Array<${itemType}>`;
       }
       if (t === 'object') return 'object';
@@ -174,30 +196,35 @@ export function inferType(
     return types.join(' | ');
   }
 
-  // OpenAPI 3.0: 支持 nullable 字段（已废弃，但仍需兼容）
+  // OpenAPI 3.0: Support for the 'nullable' field (deprecated, but still needed for compatibility)
   const isNullable = schema.nullable === true;
   
   if (type === 'array') {
-    const itemType = schema.items ? inferType(schema.items, schemas, useNamespace) : 'any';
+    const itemType = schema.items ? inferType(schema.items, openapi, useNamespace) : 'any';
     const arrayType = `Array<${itemType}>`;
     return isNullable ? `${arrayType} | null` : arrayType;
   }
 
   if (type === 'object') {
+    // This part needs to handle the schema of a parameter, which might not be a typical schema object
+    if (schema.in && schema.name && schema.schema) {
+      return inferType(schema.schema, openapi, useNamespace);
+    }
+
     let objectType: string;
     if (schema.properties) {
       const objType = new ConstructType();
       const required = schema.required || [];
       for (const [propName, propSchema] of Object.entries(schema.properties)) {
         const isRequired = required.includes(propName);
-        const propType = inferType(propSchema, schemas, useNamespace);
+        const propType = inferType(propSchema, openapi, useNamespace);
         objType.push([propName, propType, isRequired]);
       }
       objectType = objType.build();
     } else if (schema.additionalProperties) {
       const valueType = schema.additionalProperties === true 
         ? 'any' 
-        : inferType(schema.additionalProperties, schemas, useNamespace);
+        : inferType(schema.additionalProperties, openapi, useNamespace);
       objectType = `Record<string, ${valueType}>`;
     } else {
       objectType = 'Record<string, any>';
@@ -226,7 +253,7 @@ export function inferType(
   if (type === 'null') return 'null';
   if (type === 'file') return 'File';
 
-  // 处理没有 type 但有 enum 的情况
+  // Handle enums without a type
   if (schema.enum) {
     const enumType = schema.enum.map((e: any) => typeof e === 'string' ? `'${e}'` : e).join(' | ');
     return isNullable ? `${enumType} | null` : enumType;
@@ -238,10 +265,10 @@ export function inferType(
 /**
  * 生成 schemes.ts 内容
  */
-export function genSchemes(object: OpenAPIScheme): string {
+export function genSchemes(schemas: OpenAPIScheme, openapi: OpenAPIDocument): string {
   let schemes = '';
-  for (const [name, scheme] of Object.entries(object)) {
-    // 添加 JSDoc 注释
+  for (const [name, scheme] of Object.entries(schemas)) {
+    // add JSDoc Comments
     schemes += `/**\n`;
     schemes += ` * Schema: ${name}\n`;
     if (scheme.properties && Object.keys(scheme.properties).length > 0) {
@@ -257,9 +284,9 @@ export function genSchemes(object: OpenAPIScheme): string {
     for (const [propName, prop] of Object.entries(properties)) {
       const isRequired = required.includes(propName);
       const optionalMark = isRequired ? '' : '?';
-      const propType = inferType(prop as any, object, false);
+      const propType = inferType(prop as any, openapi, false);
       
-      // 为每个属性添加描述注释
+      // add property description if available
       if ((prop as any).description) {
         schemes += `  /** ${(prop as any).description} */\n`;
       }
@@ -273,7 +300,7 @@ export function genSchemes(object: OpenAPIScheme): string {
 /**
  * 解析请求参数
  */
-export function parseParams(params: ApiParameter[], schemas?: OpenAPIScheme): {
+export function parseParams(params: (ApiParameter | { $ref: string })[], openapi: OpenAPIDocument): {
   pathParams: string;
   queryParams: string;
   headerParams: string;
@@ -286,16 +313,24 @@ export function parseParams(params: ApiParameter[], schemas?: OpenAPIScheme): {
     cookieParams: new ConstructType(),
   };
   
-  for (const value of params) {
-    const paramType = inferType(value.schema, schemas);
-    if (value.in === 'path') {
-      result.pathParams.push([value.name, paramType, value.required]);
-    } else if (value.in === 'query') {
-      result.queryParams.push([value.name, paramType, value.required]);
-    } else if (value.in === 'header') {
-      result.headerParams.push([value.name, paramType, value.required]);
-    } else if (value.in === 'cookie') {
-      result.cookieParams.push([value.name, paramType, value.required]);
+  for (const param of params) {
+    let resolvedParam;
+    if ('$ref' in param) {
+        resolvedParam = resolveRef(param.$ref, openapi);
+    } else {
+        resolvedParam = param;
+    }
+    if (!resolvedParam) continue;
+
+    const paramType = inferType(resolvedParam.schema, openapi);
+    if (resolvedParam.in === 'path') {
+      result.pathParams.push([resolvedParam.name, paramType, resolvedParam.required]);
+    } else if (resolvedParam.in === 'query') {
+      result.queryParams.push([resolvedParam.name, paramType, resolvedParam.required]);
+    } else if (resolvedParam.in === 'header') {
+      result.headerParams.push([resolvedParam.name, paramType, resolvedParam.required]);
+    } else if (resolvedParam.in === 'cookie') {
+      result.cookieParams.push([resolvedParam.name, paramType, resolvedParam.required]);
     }
   }
   
@@ -308,20 +343,20 @@ export function parseParams(params: ApiParameter[], schemas?: OpenAPIScheme): {
 }
 
 /**
- * 解析请求体
+ * parse request body
  */
-export function parseRequestBody(requestBody: { content: Record<string, any> }, schemas: OpenAPIScheme): string {
+export function parseRequestBody(requestBody: { content: Record<string, any> }, openapi: OpenAPIDocument): string {
   if (requestBody.content) {
     for (const [contentType, content] of Object.entries(requestBody.content)) {
       if (contentType === 'application/json') {
-        const paramType = inferType(content.schema, schemas);
+        const paramType = inferType(content.schema, openapi);
         return paramType;
       } else if (contentType === 'application/x-www-form-urlencoded' || contentType.startsWith('multipart/')) {
-        // 优先使用 schema 定义的类型，保留类型安全
+        // prioritize schema if available
         if (content.schema) {
-          return inferType(content.schema, schemas);
+          return inferType(content.schema, openapi);
         }
-        // 没有 schema 时的兜底类型
+        // if there is no schema, fallback to generic FormData type
         return 'Record<string, string | Blob | File>';
       }
     }
@@ -332,7 +367,7 @@ export function parseRequestBody(requestBody: { content: Record<string, any> }, 
 /**
  * 解析响应类型
  */
-export function parseResponse(response: any, schemas: OpenAPIScheme): string {
+export function parseResponse(response: any, openapi: OpenAPIDocument): string {
   if (!response || !response.content) {
     return 'void';
   }
@@ -340,7 +375,7 @@ export function parseResponse(response: any, schemas: OpenAPIScheme): string {
   for (const [contentType, content] of Object.entries(response.content)) {
     if (contentType === 'application/json') {
       if (content && (content as any).schema) {
-        return inferType((content as any).schema, schemas);
+        return inferType((content as any).schema, openapi);
       }
       return 'any';
     } else if (contentType.startsWith('text/')) {
@@ -356,9 +391,9 @@ export function parseResponse(response: any, schemas: OpenAPIScheme): string {
 }
 
 /**
- * 生成 API 端点类型
+ * generate API Endpoints type
  */
-export function genPaths(endpoints: OpenapiPaths, schemas: OpenAPIScheme): string {
+export function genPaths(endpoints: OpenapiPaths, openapi: OpenAPIDocument): string {
   let paths = 'export type API_Endpoints = ';
   const pathMain = new ConstructType();
   
@@ -368,19 +403,19 @@ export function genPaths(endpoints: OpenapiPaths, schemas: OpenAPIScheme): strin
     for (const method of Object.keys(endpoint)) {
       const methodType = new ConstructType();
       const endpointDetail = endpoint[method as HttpMethod];
-      const r = parseParams(endpointDetail.parameters || [], schemas);
+      const r = parseParams(endpointDetail.parameters || [], openapi);
       
       methodType.push(['pathParams', r.pathParams]);
       methodType.push(['queryParams', r.queryParams]);
       methodType.push(['headerParams', r.headerParams]);
       methodType.push(['cookieParams', r.cookieParams]);
-      methodType.push(['bodyParams', parseRequestBody(endpointDetail.requestBody || {content: {}}, schemas)]);
+      methodType.push(['bodyParams', parseRequestBody(endpointDetail.requestBody || {content: {}}, openapi)]);
       
       // Responses
       const responsesType = new ConstructType();
       const responses = endpointDetail.responses || {};
       for (const [statusCode, response] of Object.entries(responses)) {
-        const responseType = parseResponse(response, schemas);
+        const responseType = parseResponse(response, openapi);
         responsesType.push([statusCode, responseType]);
       }
       methodType.push(['responses', responsesType]);
@@ -393,7 +428,7 @@ export function genPaths(endpoints: OpenapiPaths, schemas: OpenAPIScheme): strin
 }
 
 /**
- * 生成 API 客户端代码
+ * generate API client base code
  */
 export function genClient(base: string, servers: string[]): string {
   const allServers = Array.from(new Set([base, ...servers]));
@@ -873,10 +908,14 @@ export default async function apiClient<
 }
 
 /**
- * 生成完整的 index.ts 文件内容
+ * generate complete index.ts file
  */
-export function summary(paths: OpenapiPaths, base: string, schemas: OpenAPIScheme, servers: string[] = []): string {
-  // 生成端点摘要注释
+export function summary(openapi: OpenAPIDocument, base: string): string {
+  const paths = openapi.paths || {};
+  const schemas = openapi.components?.schemas || {};
+  const servers = (openapi.servers || []).map((s: any) => s.url);
+
+  // generate Endpoints summary comments
   let endpointComments = '/**\n * API Endpoints Summary:\n';
   for (const [path, endpoint] of Object.entries(paths)) {
     for (const method of Object.keys(endpoint)) {
@@ -892,7 +931,7 @@ export function summary(paths: OpenapiPaths, base: string, schemas: OpenAPISchem
 
   return `import type * as Schemes from './schemes';
 
-${endpointComments}${genPaths(paths, schemas)}
+${endpointComments}${genPaths(paths, openapi)}
 
 ${genClient(base, servers)}
 `;
