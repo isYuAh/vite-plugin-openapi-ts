@@ -698,6 +698,8 @@ type IsEmptyOrAllOptional<T> = {} extends T ? true : false;
 
 type ExtractParams<T, K extends string> = T extends {[key in K]: infer P} ? P : {};
 
+type ExtractSuccessResponses<T> = T extends { responses: infer R } ? R[Extract<keyof R, \`2\${string}\`>] : any;
+
 // 根据是否有必填字段决定该字段是必填还是可选
 type OptionalIfEmpty<K extends string, T> = IsEmptyOrAllOptional<T> extends true 
   ? { [P in K]?: T } 
@@ -748,7 +750,7 @@ export default async function apiClient<
   path: T,
   method: M,
   ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
-): Promise<ApiResponse<API_Endpoints[T][M] extends {responses: {200: infer R}} ? R : any>> {
+): Promise<ApiResponse<ExtractSuccessResponses<API_Endpoints[T][M]>>> {
   const options = args[0];
   const { 
     query = {}, 
