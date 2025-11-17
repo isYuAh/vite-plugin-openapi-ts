@@ -806,7 +806,7 @@ export default async function apiClient<
   const signal = requestConfig.signal || controller.signal;
   
   let timeoutId: any;
-  if (timeout) {
+  if (timeout > 0) {
     timeoutId = setTimeout(() => controller.abort(), timeout);
   }
   
