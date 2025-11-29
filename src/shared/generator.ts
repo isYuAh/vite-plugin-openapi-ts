@@ -416,7 +416,7 @@ export function genPaths(endpoints: OpenapiPaths, openapi: OpenAPIDocument): str
       const responses = endpointDetail.responses || {};
       for (const [statusCode, response] of Object.entries(responses)) {
         const responseType = parseResponse(response, openapi);
-        responsesType.push([statusCode, responseType]);
+        responsesType.push([`'${statusCode}'`, responseType]);
       }
       methodType.push(['responses', responsesType]);
       pathType.push([method, methodType]);
