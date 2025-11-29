@@ -105,9 +105,12 @@ const { data: profile } = await apiClient(
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `url` | `string` | *required* | URL to your OpenAPI specification (supports `.json`, `.yaml`, `.yml`) |
-| `baseUrl` | `string` | Auto-detected from URL | Base URL for API requests |
+| `url` | `string` | *required* | OpenAPI specification source, supports HTTP/HTTPS URL or local file path (supports `.json`, `.yaml`, `.yml`) |
+| `baseUrl` | `string` | Auto-detected from URL | Base URL for API requests. When using a local spec file, you **must** provide this (either in options or `openapi.config.json`) |
 | `outputDir` | `string` | `src/openapi` | Directory where types will be generated |
+| `enableCache` | `boolean` | `true` | Enable hash-based cache to skip regeneration when the spec content and baseUrl have not changed |
+| `skipTimeout` | `number` | `0` | Timeout in milliseconds. When cache is enabled and `force` is `false`, if the last generation is within this duration and `url`/`baseUrl` are unchanged, generation will be skipped |
+| `force` | `boolean` | `false` | Force regeneration by bypassing cache and `skipTimeout` |
 
 ## Supported Features
 
@@ -341,6 +344,34 @@ const { data } = await apiClient('/users', 'get', {
   }
 });
 ```
+
+## Configuration via `openapi.config.json`
+
+You can configure both the Vite plugin and the CLI via a shared `openapi.config.json` file placed at your project root.
+
+Example:
+
+```json
+{
+  "url": "http://localhost:8080/v3/api-docs",
+  "baseUrl": "http://localhost:8080",
+  "outputDir": "src/openapi",
+  "enableCache": true,
+  "skipTimeout": 0,
+  "force": false
+}
+```
+
+Behavior:
+
+- **Vite plugin**
+  - When you call `openapiPlugin()` **without arguments**, the plugin will try to read `openapi.config.json` from `process.cwd()` and use it as the configuration.
+  - If neither options nor config file is provided, the plugin will stay inactive and print a warning.
+- **CLI (`openapi-ts`)**
+  - The CLI will first read `openapi.config.json` as default values, then override them with command-line options (if provided).
+  - For example, the final `url` comes from `--url` (if present), otherwise from `openapi.config.json.url`.
+
+When using a local spec file (e.g. `./openapi.yaml`) as `url`, make sure to provide a proper `baseUrl` either in `openapi.config.json` or via CLI / plugin options.
 
 ## License
 

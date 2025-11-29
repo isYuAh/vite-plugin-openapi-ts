@@ -148,9 +148,12 @@ try {
 
 | 选项 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `url` | `string` | *必填* | OpenAPI 规范的 URL（支持 `.json`、`.yaml`、`.yml`） |
-| `baseUrl` | `string` | 从 URL 自动提取 | API 请求的基础 URL |
+| `url` | `string` | *必填* | OpenAPI 规范来源，支持 HTTP/HTTPS URL 或本地文件路径（支持 `.json`、`.yaml`、`.yml`） |
+| `baseUrl` | `string` | 从 URL 自动提取 | API 请求的基础 URL。本地文件路径作为 `url` 时，**必须显式提供**（可在插件配置或 `openapi.config.json` 中配置） |
 | `outputDir` | `string` | `src/openapi` | 生成类型文件的目录 |
+| `enableCache` | `boolean` | `true` | 是否启用基于内容哈希的缓存，在规范内容和 `baseUrl` 未变化时跳过重新生成 |
+| `skipTimeout` | `number` | `0` | 跳过超时时间（毫秒）。在启用缓存且未设置 `force` 时，如果距离上次生成时间小于该值且 `url`/`baseUrl` 未变化，则直接跳过生成 |
+| `force` | `boolean` | `false` | 是否强制重新生成，忽略缓存与 `skipTimeout` |
 
 ## 支持的特性
 
@@ -448,10 +451,39 @@ src/openapi/
 
 确保你的 CI/CD 流程可以访问 OpenAPI 规范 URL，或者将规范文件提交到仓库。
 
+### 4. 使用配置文件 openapi.config.json
+
+你可以在项目根目录创建一个 `openapi.config.json` 文件，把常用的默认配置集中写在这里：
+
+```json
+{
+  "url": "http://localhost:8080/v3/api-docs",
+  "baseUrl": "http://localhost:8080",
+  "outputDir": "src/openapi",
+  "enableCache": true,
+  "skipTimeout": 0,
+  "force": false
+}
+```
+
+行为说明：
+
+- **Vite 插件**
+  - 在 `vite.config.ts` 中调用 `openapiPlugin()` **不传任何参数** 时，插件会尝试从当前工作目录读取 `openapi.config.json`，并将其作为配置。
+  - 如果既没有传入参数，也不存在配置文件，插件会保持“空实现”并输出一条提示日志。
+- **CLI（`openapi-ts`）**
+  - CLI 会先读取 `openapi.config.json` 作为默认值，再由命令行参数进行覆盖。
+  - 例如，最终的 `url` 来源优先级为：`--url` > `openapi.config.json.url`。
+
+当你使用本地文件路径（例如 `./openapi.yaml`）作为 `url` 时，请务必在配置文件或命令行/插件选项中提供一个正确的 `baseUrl`，否则生成的客户端无法正确指向实际 API 服务地址。
+
 ## 常见问题
 
 ### Q: 支持本地文件吗？
-A: 目前仅支持 HTTP/HTTPS URL。如果需要使用本地文件，可以使用本地服务器提供文件。
+A: 支持。你可以把 `url` 写成本地文件路径（例如 `./openapi.yaml` 或 `./openapi.json`）。
+
+- 使用 CLI 时，如果 `url` 是本地文件路径，**必须同时提供 `baseUrl`**（可以写在 `openapi.config.json` 中，或者通过 `--base-url` 参数传入）；
+- 使用 Vite 插件时，如果使用本地文件路径而没有显式配置 `baseUrl`，插件会回退到默认值 `http://localhost:8080`，通常推荐在配置里显式设置一个符合实际环境的 `baseUrl`。
 
 ### Q: 如何处理多个 API 源？
 A: 你可以多次使用插件，每次使用不同的 `outputDir`：
