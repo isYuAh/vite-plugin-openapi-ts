@@ -66,7 +66,8 @@ export default function openapiPlugin(options?: PluginOptions): Plugin {
       const pluginLogger: Logger = {
         info: (msg: string) => this.info(msg),
         warn: (msg: string) => this.warn(msg),
-        error: (msg: string) => this.error(msg),
+        // 使用 warn 避免中断 dev 进程
+        error: (msg: string) => this.warn(msg),
         dim: (msg: string) => this.info(pc.dim(msg)),
       };
 
@@ -107,7 +108,8 @@ export default function openapiPlugin(options?: PluginOptions): Plugin {
           writeCache: writePluginCache,
         });
       } catch (error) {
-        pluginLogger.error(pc.red(`[openapi-ts] Failed to generate types: ${error}`));
+        // 降级为警告，避免阻断 dev 命令
+        pluginLogger.warn(pc.yellow(`[openapi-ts] Failed to generate types: ${error}`));
       }
     }
   };
