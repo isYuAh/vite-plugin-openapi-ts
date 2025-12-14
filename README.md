@@ -144,6 +144,7 @@ const { data: profile } = await apiClient(
 - ✅ **Automatic Retry with Configurable Strategy**
 - ✅ **Global Error Handler**
 - ✅ **Automatic FormData Conversion for File Uploads**
+- ✅ **Instance-based client with pluggable HTTP adapter (fetch by default)**
 - ✅ Full TypeScript IntelliSense support
 
 ## Advanced Features
@@ -179,6 +180,59 @@ interceptors.error.use(async (error) => {
 
 // Remove interceptor when needed
 removeRequestInterceptor();
+```
+
+### Instance Client & Custom HTTP Adapter
+
+```ts
+import apiClient, { createApiClient, setHttpClient, HttpClient } from './openapi';
+
+// 1) Create an isolated client instance (callable + properties)
+const client = createApiClient({
+  baseUrl: 'https://api.example.com',
+  headers: { Authorization: 'Bearer xxx' },
+});
+
+// Attach interceptors before any calls
+client.interceptors.request.use(async (cfg) => {
+  cfg.headers['X-Instance'] = 'demo';
+  return cfg;
+});
+
+// Use the instance
+const { data } = await client('/users', 'get');
+
+// 2) Replace transport with a custom HTTP adapter (example: axios). axios is not bundled; install it yourself.
+import axios from 'axios';
+
+const axiosInstance = axios.create({
+  // carry your axios interceptors here
+});
+
+const axiosAdapter: HttpClient = async ({ url, ...rest }) => {
+  const res = await axiosInstance.request({
+    url: url.toString(),
+    method: rest.method as any,
+    headers: rest.headers,
+    data: rest.body,
+    signal: rest.signal as any,
+    responseType: 'arraybuffer',   // keeps binary data intact
+    validateStatus: () => true,    // mimic fetch: never throw on HTTP status
+  });
+
+  return new Response(res.data, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers as any,
+  });
+};
+
+// Apply to default client
+setHttpClient(axiosAdapter);
+// Or to an instance
+// client.setHttpClient(axiosAdapter);
+
+// Now apiClient / client will send requests via axios (and its interceptors)
 ```
 
 ### Request Cancellation

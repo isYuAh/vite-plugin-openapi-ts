@@ -187,6 +187,7 @@ try {
 - ✅ **可配置策略的自动重试**
 - ✅ **全局错误处理器**
 - ✅ **文件上传自动转换 FormData**
+- ✅ **可实例化客户端 + 可插拔 HTTP 适配器（默认 fetch）**
 - ✅ 完整的 TypeScript IntelliSense 支持
 
 ## 高级功能
@@ -222,6 +223,59 @@ interceptors.error.use(async (error) => {
 
 // 需要时移除拦截器
 removeRequestInterceptor();
+```
+
+### 实例化客户端 & 自定义 HTTP 适配器
+
+```ts
+import apiClient, { createApiClient, setHttpClient, HttpClient } from './openapi';
+
+// 1) 创建独立实例（既可调用又带 config / interceptors 等属性）
+const client = createApiClient({
+  baseUrl: 'https://api.example.com',
+  headers: { Authorization: 'Bearer xxx' },
+});
+
+// 在任何调用前插入拦截器
+client.interceptors.request.use(async (cfg) => {
+  cfg.headers['X-Instance'] = 'demo';
+  return cfg;
+});
+
+// 使用该实例
+const { data } = await client('/users', 'get');
+
+// 2) 自定义 HTTP 适配器示例：使用 axios（库请自行安装，我们不内置）
+import axios from 'axios';
+
+const axiosInstance = axios.create({
+  // 这里可以挂你的 axios 拦截器
+});
+
+const axiosAdapter: HttpClient = async ({ url, ...rest }) => {
+  const res = await axiosInstance.request({
+    url: url.toString(),
+    method: rest.method as any,
+    headers: rest.headers,
+    data: rest.body,
+    signal: rest.signal as any,
+    responseType: 'arraybuffer',   // 保持二进制数据
+    validateStatus: () => true,    // 模拟 fetch：不因状态码抛错
+  });
+
+  return new Response(res.data, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers as any,
+  });
+};
+
+// 应用于默认 client
+setHttpClient(axiosAdapter);
+// 或单独实例
+// client.setHttpClient(axiosAdapter);
+
+// 之后 apiClient / client 会通过 axios（及其拦截器）发送请求
 ```
 
 ### 请求取消

@@ -437,12 +437,29 @@ export function genClient(base: string, servers: string[]): string {
   return `
 export type ServerUrl = ${serverLiterals} | (string & {});
 
-export let config = {
+/**
+ * HTTP 客户端抽象，支持替换为 axios 等自定义实现。
+ */
+export type HttpClientRequest = RequestInit & { url: URL };
+export type HttpClient = (request: HttpClientRequest) => Promise<Response>;
+
+// 默认基于 fetch 的 httpClient，实现保持向后兼容
+const fetchHttpClient: HttpClient = async ({ url, ...rest }) => fetch(url, rest);
+
+export interface ApiClientConfig {
+  baseUrl: ServerUrl;
+  headers: Record<string, string>;
+  timeout: number;
+  httpClient: HttpClient;
+}
+
+export let config: ApiClientConfig = {
   baseUrl: "${base}" as ServerUrl,
   headers: {
     "Content-Type": "application/json"
   },
   timeout: 30000, // 默认 30 秒超时
+  httpClient: fetchHttpClient,
 }
 
 /**
@@ -483,6 +500,10 @@ class InterceptorManager<T> {
 
   clear(): void {
     this.interceptors = [];
+  }
+
+  getAll(): T[] {
+    return this.interceptors;
   }
 }
 
@@ -567,14 +588,15 @@ function delay(ms: number): Promise<void> {
 async function fetchWithRetry(
   url: URL,
   configs: RequestInit,
-  retryConfig?: number | {
+  retryConfig: number | {
     times: number;
     delay: number;
     retryOn?: (error: ApiError) => boolean;
-  }
+  } | undefined,
+  httpClient: HttpClient
 ): Promise<Response> {
   if (!retryConfig) {
-    return fetch(url, configs);
+    return httpClient({ url, ...configs });
   }
 
   const times = typeof retryConfig === 'number' ? retryConfig : retryConfig.times;
@@ -587,7 +609,7 @@ async function fetchWithRetry(
 
   for (let attempt = 0; attempt <= times; attempt++) {
     try {
-      const response = await fetch(url, configs);
+      const response = await httpClient({ url, ...configs });
 
       if (response.ok) {
         return response;
@@ -729,6 +751,8 @@ export type ApiClientOptions<
         delay: number;
         retryOn?: (error: ApiError) => boolean;
       };
+      /** 单次请求覆盖 httpClient */
+      httpClient?: HttpClient;
     };
   };
 
@@ -743,169 +767,246 @@ type IsOptionsRequired<
   IsEmptyOrAllOptional<ExtractParams<API_Endpoints[T][M], 'bodyParams'>> extends false ? true :
   false;
 
-export default async function apiClient<
-  T extends keyof API_Endpoints,
-  M extends keyof API_Endpoints[T] & string
->(
-  path: T,
-  method: M,
-  ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
-): Promise<ApiResponse<ExtractSuccessResponses<API_Endpoints[T][M]>>> {
-  const options = args[0];
-  const { 
-    query = {}, 
-    params = {}, 
-    header = {},
-    cookie = {},
-    body = {}, 
-    baseUrl = config.baseUrl,
-    headers = config.headers,
-    requestConfig = {}
-  } = options || {};
-  
-  // 处理路径拼接：如果 path 以 / 开头，需要去掉以正确拼接到 baseUrl
-  const builtPath = buildPath(path as string, params as any);
-  const relativePath = builtPath.startsWith('/') ? builtPath.slice(1) : builtPath;
-  const fullUrl = baseUrl.endsWith('/') ? baseUrl + relativePath : baseUrl + '/' + relativePath;
-  const url = new URL(fullUrl);
-  url.search = new URLSearchParams(query as any).toString();
-  
-  // 合并默认 headers 和参数中的 headers
-  const mergedHeaders: any = { ...headers };
-  for (const [key, value] of Object.entries(header as any)) {
-    mergedHeaders[key] = String(value);
-  }
-  
-  // 处理 cookie 参数
-  if (Object.keys(cookie as any).length > 0) {
-    const cookieString = Object.entries(cookie as any)
-      .map(([key, value]) => \`\${key}=\${value}\`)
-      .join('; ');
-    if (mergedHeaders['Cookie']) {
-      mergedHeaders['Cookie'] += '; ' + cookieString;
-    } else {
-      mergedHeaders['Cookie'] = cookieString;
-    }
-  }
-  
-  // 处理请求体：自动检测是否需要 FormData
-  let processedBody: any;
-  if (method !== 'get' && method !== 'head') {
-    if (shouldUseFormData(body)) {
-      processedBody = toFormData(body as Record<string, any>);
-      // 删除 Content-Type，让浏览器自动设置（包含 boundary）
-      delete mergedHeaders['Content-Type'];
-    } else {
-      processedBody = JSON.stringify(body);
-    }
-  }
-  
-  // 处理超时和取消
-  const timeout = requestConfig.timeout ?? config.timeout;
-  const controller = new AbortController();
-  const signal = requestConfig.signal || controller.signal;
-  
-  let timeoutId: any;
-  if (timeout > 0) {
-    timeoutId = setTimeout(() => controller.abort(), timeout);
-  }
-  
-  // 构建请求配置
-  let requestCfg: RequestConfig = {
-    url,
-    method,
-    headers: mergedHeaders,
-    body: processedBody,
-    signal
+type ApiClientInstance = {
+  <T extends keyof API_Endpoints, M extends keyof API_Endpoints[T] & string>(
+    path: T,
+    method: M,
+    ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
+  ): Promise<ApiResponse<ExtractSuccessResponses<API_Endpoints[T][M]>>>;
+  config: ApiClientConfig;
+  interceptors: {
+    request: InterceptorManager<RequestInterceptor>;
+    response: InterceptorManager<ResponseInterceptor>;
+    error: InterceptorManager<ErrorInterceptor>;
   };
-  
-  // 执行请求拦截器
-  for (const interceptor of (interceptors.request as any).interceptors) {
-    requestCfg = await interceptor(requestCfg);
-  }
-  
-  const fetchConfigs: RequestInit = {
-    method: requestCfg.method,
-    headers: requestCfg.headers,
-    body: requestCfg.body,
-    signal: requestCfg.signal,
+  setErrorHandler: (handler: (error: ApiError) => void) => void;
+  getHttpClient: () => HttpClient;
+  setHttpClient: (client: HttpClient) => void;
+};
+
+export function createApiClient(customConfig?: Partial<ApiClientConfig>): ApiClientInstance {
+  const isDefaultInstance = !customConfig;
+  const instanceConfig: ApiClientConfig = isDefaultInstance
+    ? config
+    : {
+        ...config,
+        ...customConfig,
+        headers: { ...config.headers, ...(customConfig?.headers || {}) },
+        httpClient: customConfig?.httpClient ?? config.httpClient,
+      };
+
+  const localInterceptors = {
+    request: new InterceptorManager<RequestInterceptor>(),
+    response: new InterceptorManager<ResponseInterceptor>(),
+    error: new InterceptorManager<ErrorInterceptor>(),
   };
-  
-  try {
-    // 发送请求（支持重试）
-    const response = await fetchWithRetry(requestCfg.url, fetchConfigs, requestConfig.retry);
+
+  let localOnError: ((error: ApiError) => void) | null = null;
+
+  const client = async <
+    T extends keyof API_Endpoints,
+    M extends keyof API_Endpoints[T] & string
+  >(
+    path: T,
+    method: M,
+    ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
+  ): Promise<ApiResponse<ExtractSuccessResponses<API_Endpoints[T][M]>>> => {
+    const options = args[0];
+    const { 
+      query = {}, 
+      params = {}, 
+      header = {},
+      cookie = {},
+      body = {}, 
+      baseUrl = instanceConfig.baseUrl,
+      headers = instanceConfig.headers,
+      requestConfig = {}
+    } = options || {};
     
-    if (timeoutId) clearTimeout(timeoutId);
+    // 处理路径拼接：如果 path 以 / 开头，需要去掉以正确拼接到 baseUrl
+    const builtPath = buildPath(path as string, params as any);
+    const relativePath = builtPath.startsWith('/') ? builtPath.slice(1) : builtPath;
+    const fullUrl = baseUrl.endsWith('/') ? baseUrl + relativePath : baseUrl + '/' + relativePath;
+    const url = new URL(fullUrl);
+    url.search = new URLSearchParams(query as any).toString();
     
-    if (!response.ok) {
-      const contentType = response.headers.get('content-type');
-      let errorData: any;
-      try {
-        if (contentType?.includes('application/json')) {
-          errorData = await response.json();
-        } else if (contentType?.includes('text/')) {
-          errorData = await response.text();
-        } else {
-          errorData = await response.text();
-        }
-      } catch (e) {
-        errorData = null;
+    // 合并默认 headers 和参数中的 headers
+    const mergedHeaders: any = { ...headers };
+    for (const [key, value] of Object.entries(header as any)) {
+      mergedHeaders[key] = String(value);
+    }
+    
+    // 处理 cookie 参数
+    if (Object.keys(cookie as any).length > 0) {
+      const cookieString = Object.entries(cookie as any)
+        .map(([key, value]) => \`\${key}=\${value}\`)
+        .join('; ');
+      if (mergedHeaders['Cookie']) {
+        mergedHeaders['Cookie'] += '; ' + cookieString;
+      } else {
+        mergedHeaders['Cookie'] = cookieString;
       }
-      throw new ApiError(
-        \`API request failed: \${response.status} \${response.statusText}\`,
-        response.status,
-        response,
-        errorData
-      );
     }
     
-    // 解析响应数据
-    const contentType = response.headers.get('content-type')
-    let data: any;
-    if (contentType?.includes('application/json')) {
-      data = await response.json()
-    } else if (contentType?.includes('text/')) {
-      data = await response.text()
-    } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
-      data = await response.blob()
-    } else {
-      data = await response.json()
+    // 处理请求体：自动检测是否需要 FormData
+    let processedBody: any;
+    if (method !== 'get' && method !== 'head') {
+      if (shouldUseFormData(body)) {
+        processedBody = toFormData(body as Record<string, any>);
+        // 删除 Content-Type，让浏览器自动设置（包含 boundary）
+        delete mergedHeaders['Content-Type'];
+      } else {
+        processedBody = JSON.stringify(body);
+      }
     }
     
-    let result: ApiResponse<any> = { data, response };
+    // 处理超时和取消
+    const timeout = requestConfig.timeout ?? instanceConfig.timeout;
+    const controller = new AbortController();
+    const signal = requestConfig.signal || controller.signal;
     
-    // 执行响应拦截器
-    for (const interceptor of (interceptors.response as any).interceptors) {
-      result = await interceptor(result);
+    let timeoutId: any;
+    if (timeout > 0) {
+      timeoutId = setTimeout(() => controller.abort(), timeout);
     }
     
-    return result;
+    // 构建请求配置
+    let requestCfg: RequestConfig = {
+      url,
+      method,
+      headers: mergedHeaders,
+      body: processedBody,
+      signal
+    };
     
-  } catch (error) {
-    if (timeoutId) clearTimeout(timeoutId);
+    // 执行实例级请求拦截器
+    for (const interceptor of localInterceptors.request.getAll()) {
+      requestCfg = await interceptor(requestCfg);
+    }
+    // 执行默认（全局）请求拦截器，保持兼容
+    for (const interceptor of interceptors.request.getAll()) {
+      requestCfg = await interceptor(requestCfg);
+    }
     
-    const apiError = error instanceof ApiError 
-      ? error 
-      : new ApiError(
-          error instanceof Error ? error.message : String(error),
-          0,
-          null as any,
-          null
+    const fetchConfigs: RequestInit = {
+      method: requestCfg.method,
+      headers: requestCfg.headers,
+      body: requestCfg.body,
+      signal: requestCfg.signal,
+    };
+    
+    const resolvedHttpClient = requestConfig.httpClient || instanceConfig.httpClient;
+    
+    try {
+      // 发送请求（支持重试）
+      const response = await fetchWithRetry(requestCfg.url, fetchConfigs, requestConfig.retry, resolvedHttpClient);
+      
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        let errorData: any;
+        try {
+          if (contentType?.includes('application/json')) {
+            errorData = await response.clone().json();
+          } else if (contentType?.includes('text/')) {
+            errorData = await response.clone().text();
+          } else {
+            errorData = await response.clone().text();
+          }
+        } catch (e) {
+          errorData = null;
+        }
+        throw new ApiError(
+          \`API request failed: \${response.status} \${response.statusText}\`,
+          response.status,
+          response,
+          errorData
         );
-    
-    // 执行错误拦截器
-    for (const interceptor of (interceptors.error as any).interceptors) {
-      await interceptor(apiError);
+      }
+      
+      // 解析响应数据
+      const contentType = response.headers.get('content-type')
+      let data: any;
+      if (contentType?.includes('application/json')) {
+        data = await response.json()
+      } else if (contentType?.includes('text/')) {
+        data = await response.text()
+      } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
+        data = await response.blob()
+      } else {
+        data = await response.json()
+      }
+      
+      let result: ApiResponse<any> = { data, response };
+      
+      // 执行响应拦截器：实例级 → 默认
+      for (const interceptor of localInterceptors.response.getAll()) {
+        result = await interceptor(result);
+      }
+      for (const interceptor of interceptors.response.getAll()) {
+        result = await interceptor(result);
+      }
+      
+      return result;
+      
+    } catch (error) {
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      const apiError = error instanceof ApiError 
+        ? error 
+        : new ApiError(
+            error instanceof Error ? error.message : String(error),
+            0,
+            null as any,
+            null
+          );
+      
+      // 错误拦截器：实例级 → 默认
+      for (const interceptor of localInterceptors.error.getAll()) {
+        await interceptor(apiError);
+      }
+      for (const interceptor of interceptors.error.getAll()) {
+        await interceptor(apiError);
+      }
+      
+      // 实例优先的错误处理，其次使用全局 onError
+      if (localOnError) {
+        localOnError(apiError);
+      } else if (onError) {
+        onError(apiError);
+      }
+      
+      throw apiError;
     }
-    
-    // 执行全局错误处理
-    if (onError) {
-      onError(apiError);
+  };
+
+  const boundClient = client as ApiClientInstance;
+  boundClient.config = instanceConfig;
+  boundClient.interceptors = localInterceptors;
+  boundClient.setErrorHandler = (handler: (error: ApiError) => void) => {
+    localOnError = handler;
+  };
+  boundClient.getHttpClient = () => instanceConfig.httpClient;
+  boundClient.setHttpClient = (client: HttpClient) => {
+    instanceConfig.httpClient = client;
+    if (isDefaultInstance) {
+      config.httpClient = client;
     }
-    
-    throw apiError;
-  }
+  };
+
+  return boundClient;
 }
+
+// 默认实例，保持旧用法兼容
+const defaultClient = createApiClient();
+
+export default defaultClient;
+export const requestInterceptors = defaultClient.interceptors.request;
+export const responseInterceptors = defaultClient.interceptors.response;
+export const errorInterceptors = defaultClient.interceptors.error;
+export const getHttpClient = defaultClient.getHttpClient;
+export const setHttpClient = defaultClient.setHttpClient;
 `;
 }
 
