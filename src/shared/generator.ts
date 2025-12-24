@@ -346,21 +346,55 @@ export function parseParams(params: (ApiParameter | { $ref: string })[], openapi
  * parse request body
  */
 export function parseRequestBody(requestBody: { content: Record<string, any> }, openapi: OpenAPIDocument): string {
-  if (requestBody.content) {
-    for (const [contentType, content] of Object.entries(requestBody.content)) {
-      if (contentType === 'application/json') {
-        const paramType = inferType(content.schema, openapi);
-        return paramType;
-      } else if (contentType === 'application/x-www-form-urlencoded' || contentType.startsWith('multipart/')) {
-        // prioritize schema if available
-        if (content.schema) {
-          return inferType(content.schema, openapi);
-        }
-        // if there is no schema, fallback to generic FormData type
-        return 'Record<string, string | Blob | File>';
-      }
+  const normalizeMediaType = (mediaType: string): string => mediaType.split(';')[0]?.trim().toLowerCase();
+  const isJsonLikeMediaType = (mediaType: string): boolean => {
+    const mt = normalizeMediaType(mediaType);
+    return mt === 'application/json' || mt.endsWith('+json') || mt === 'text/json';
+  };
+  const isWildcardMediaType = (mediaType: string): boolean => {
+    const mt = normalizeMediaType(mediaType);
+    return mt === '*/*' || mt.includes('*');
+  };
+  const getSchema = (mediaContent: any): any | undefined => {
+    if (!mediaContent || typeof mediaContent !== 'object') return undefined;
+    return (mediaContent as any).schema ?? undefined;
+  };
+
+  if (!requestBody?.content) return 'any';
+
+  // 1) Prefer explicit JSON-like media types (application/json, application/*+json, etc.)
+  for (const [contentType, content] of Object.entries(requestBody.content)) {
+    if (!isJsonLikeMediaType(contentType)) continue;
+    const schema = getSchema(content);
+    if (schema) return inferType(schema, openapi);
+  }
+
+  // 2) Handle forms
+  for (const [contentType, content] of Object.entries(requestBody.content)) {
+    const mt = normalizeMediaType(contentType);
+    if (mt === 'application/x-www-form-urlencoded' || mt.startsWith('multipart/')) {
+      // prioritize schema if available
+      const schema = getSchema(content);
+      if (schema) return inferType(schema, openapi);
+      // if there is no schema, fallback to generic FormData type
+      return 'Record<string, string | Blob | File>';
     }
   }
+
+  // 3) Springdoc sometimes emits "*/*" even for JSON; if schema exists, infer it.
+  for (const [contentType, content] of Object.entries(requestBody.content)) {
+    if (!isWildcardMediaType(contentType)) continue;
+    const schema = getSchema(content);
+    if (schema) return inferType(schema, openapi);
+  }
+
+  // 4) If there's only one content entry and it contains a schema, infer it as a last resort.
+  const entries = Object.entries(requestBody.content);
+  if (entries.length === 1) {
+    const schema = getSchema(entries[0]?.[1]);
+    if (schema) return inferType(schema, openapi);
+  }
+
   return 'any';
 }
 
@@ -371,22 +405,57 @@ export function parseResponse(response: any, openapi: OpenAPIDocument): string {
   if (!response || !response.content) {
     return 'void';
   }
-  
+
+  const normalizeMediaType = (mediaType: string): string => mediaType.split(';')[0]?.trim().toLowerCase();
+  const isJsonLikeMediaType = (mediaType: string): boolean => {
+    const mt = normalizeMediaType(mediaType);
+    return mt === 'application/json' || mt.endsWith('+json') || mt === 'text/json';
+  };
+  const isWildcardMediaType = (mediaType: string): boolean => {
+    const mt = normalizeMediaType(mediaType);
+    return mt === '*/*' || mt.includes('*');
+  };
+  const isTextMediaType = (mediaType: string): boolean => normalizeMediaType(mediaType).startsWith('text/');
+  const isBinaryBlobMediaType = (mediaType: string): boolean => {
+    const mt = normalizeMediaType(mediaType);
+    return mt === 'application/octet-stream' || mt.startsWith('image/') || mt === 'application/pdf';
+  };
+  const getSchema = (mediaContent: any): any | undefined => {
+    if (!mediaContent || typeof mediaContent !== 'object') return undefined;
+    return (mediaContent as any).schema ?? undefined;
+  };
+
+  // 1) Prefer JSON-like media types that carry schema.
   for (const [contentType, content] of Object.entries(response.content)) {
-    if (contentType === 'application/json') {
-      if (content && (content as any).schema) {
-        return inferType((content as any).schema, openapi);
-      }
-      return 'any';
-    } else if (contentType.startsWith('text/')) {
-      return 'string';
-    } else if (contentType === 'application/octet-stream' || contentType.startsWith('image/')) {
-      return 'Blob';
-    } else if (contentType === 'application/pdf') {
-      return 'Blob';
-    }
+    if (!isJsonLikeMediaType(contentType)) continue;
+    const schema = getSchema(content);
+    if (schema) return inferType(schema, openapi);
   }
-  
+
+  // 2) Explicit text responses
+  if (Object.keys(response.content).some(isTextMediaType)) {
+    return 'string';
+  }
+
+  // 3) Explicit binary/blob responses
+  if (Object.keys(response.content).some(isBinaryBlobMediaType)) {
+    return 'Blob';
+  }
+
+  // 4) Springdoc sometimes emits "*/*" even for JSON; if schema exists, infer it.
+  for (const [contentType, content] of Object.entries(response.content)) {
+    if (!isWildcardMediaType(contentType)) continue;
+    const schema = getSchema(content);
+    if (schema) return inferType(schema, openapi);
+  }
+
+  // 5) If there's only one content entry and it contains a schema, infer it as a last resort.
+  const entries = Object.entries(response.content);
+  if (entries.length === 1) {
+    const schema = getSchema(entries[0]?.[1]);
+    if (schema) return inferType(schema, openapi);
+  }
+
   return 'any';
 }
 
@@ -467,14 +536,21 @@ export let config: ApiClientConfig = {
  */
 type RequestInterceptor = (config: RequestConfig) => RequestConfig | Promise<RequestConfig>;
 type ResponseInterceptor = (response: ApiResponse<any>) => ApiResponse<any> | Promise<ApiResponse<any>>;
-type ErrorInterceptor = (error: ApiError) => Promise<never>;
+type ErrorInterceptor = (error: ApiError) => Promise<ApiResponse<any> | void>;
 
-interface RequestConfig {
+export interface RequestConfig {
   url: URL;
   method: string;
   headers: Record<string, string>;
   body?: any;
   signal?: AbortSignal;
+  timeout?: number;
+  retry?: number | {
+    times: number;
+    delay: number;
+    retryOn?: (error: ApiError) => boolean;
+  };
+  httpClient?: HttpClient;
 }
 
 /**
@@ -588,6 +664,7 @@ function delay(ms: number): Promise<void> {
 async function fetchWithRetry(
   url: URL,
   configs: RequestInit,
+  requestConfig: RequestConfig,
   retryConfig: number | {
     times: number;
     delay: number;
@@ -634,6 +711,7 @@ async function fetchWithRetry(
         \`API request failed: \${response.status} \${response.statusText}\`,
         response.status,
         response,
+        requestConfig,
         errorData
       );
 
@@ -702,6 +780,7 @@ export const buildPath = (template: string, params: Record<string, any>): string
 export type ApiResponse<T> = {
   data: T;
   response: Response;
+  requestConfig: RequestConfig;
 }
 
 export class ApiError extends Error {
@@ -709,6 +788,7 @@ export class ApiError extends Error {
     message: string,
     public status: number,
     public response: Response,
+    public requestConfig: RequestConfig,
     public data?: any
   ) {
     super(message);
@@ -773,6 +853,7 @@ type ApiClientInstance = {
     method: M,
     ...args: IsOptionsRequired<T, M> extends true ? [options: ApiClientOptions<T, M>] : [options?: ApiClientOptions<T, M>]
   ): Promise<ApiResponse<ExtractSuccessResponses<API_Endpoints[T][M]>>>;
+  request(config: RequestConfig): Promise<ApiResponse<any>>;
   config: ApiClientConfig;
   interceptors: {
     request: InterceptorManager<RequestInterceptor>;
@@ -802,6 +883,123 @@ export function createApiClient(customConfig?: Partial<ApiClientConfig>): ApiCli
   };
 
   let localOnError: ((error: ApiError) => void) | null = null;
+
+  const coreRequest = async (initialConfig: RequestConfig): Promise<ApiResponse<any>> => {
+    let requestCfg = initialConfig;
+    
+    // 处理超时 (如果没有提供 signal)
+    let timeoutId: any;
+    if (!requestCfg.signal && requestCfg.timeout && requestCfg.timeout > 0) {
+      const controller = new AbortController();
+      requestCfg.signal = controller.signal;
+      timeoutId = setTimeout(() => controller.abort(), requestCfg.timeout);
+    }
+    
+    // 执行实例级请求拦截器
+    for (const interceptor of localInterceptors.request.getAll()) {
+      requestCfg = await interceptor(requestCfg);
+    }
+    // 执行默认（全局）请求拦截器
+    for (const interceptor of interceptors.request.getAll()) {
+      requestCfg = await interceptor(requestCfg);
+    }
+    
+    const fetchConfigs: RequestInit = {
+      method: requestCfg.method,
+      headers: requestCfg.headers,
+      body: requestCfg.body,
+      signal: requestCfg.signal,
+    };
+    
+    const resolvedHttpClient = requestCfg.httpClient || instanceConfig.httpClient;
+    
+    try {
+      // 发送请求（支持重试）
+      const response = await fetchWithRetry(requestCfg.url, fetchConfigs, requestCfg, requestCfg.retry, resolvedHttpClient);
+      
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        let errorData: any;
+        try {
+          if (contentType?.includes('application/json')) {
+            errorData = await response.clone().json();
+          } else if (contentType?.includes('text/')) {
+            errorData = await response.clone().text();
+          } else {
+            errorData = await response.clone().text();
+          }
+        } catch (e) {
+          errorData = null;
+        }
+        throw new ApiError(
+          \`API request failed: \${response.status} \${response.statusText}\`,
+          response.status,
+          response,
+          requestCfg,
+          errorData
+        );
+      }
+      
+      // 解析响应数据
+      const contentType = response.headers.get('content-type')
+      let data: any;
+      if (contentType?.includes('application/json')) {
+        data = await response.json()
+      } else if (contentType?.includes('text/')) {
+        data = await response.text()
+      } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
+        data = await response.blob()
+      } else {
+        data = await response.json()
+      }
+      
+      let result: ApiResponse<any> = { data, response, requestConfig: requestCfg };
+      
+      // 执行响应拦截器：实例级 → 默认
+      for (const interceptor of localInterceptors.response.getAll()) {
+        result = await interceptor(result);
+      }
+      for (const interceptor of interceptors.response.getAll()) {
+        result = await interceptor(result);
+      }
+      
+      return result;
+      
+    } catch (error) {
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      const apiError = error instanceof ApiError 
+        ? error 
+        : new ApiError(
+            error instanceof Error ? error.message : String(error),
+            0,
+            null as any,
+            requestCfg,
+            null
+          );
+      
+      // 错误拦截器：实例级 → 默认
+      for (const interceptor of localInterceptors.error.getAll()) {
+        const res = await interceptor(apiError);
+        if (res) return res;
+      }
+      for (const interceptor of interceptors.error.getAll()) {
+        const res = await interceptor(apiError);
+        if (res) return res;
+      }
+      
+      // 实例优先的错误处理，其次使用全局 onError
+      if (localOnError) {
+        localOnError(apiError);
+      } else if (onError) {
+        onError(apiError);
+      }
+      
+      throw apiError;
+    }
+  };
 
   const client = async <
     T extends keyof API_Endpoints,
@@ -862,13 +1060,6 @@ export function createApiClient(customConfig?: Partial<ApiClientConfig>): ApiCli
     
     // 处理超时和取消
     const timeout = requestConfig.timeout ?? instanceConfig.timeout;
-    const controller = new AbortController();
-    const signal = requestConfig.signal || controller.signal;
-    
-    let timeoutId: any;
-    if (timeout > 0) {
-      timeoutId = setTimeout(() => controller.abort(), timeout);
-    }
     
     // 构建请求配置
     let requestCfg: RequestConfig = {
@@ -876,112 +1067,17 @@ export function createApiClient(customConfig?: Partial<ApiClientConfig>): ApiCli
       method,
       headers: mergedHeaders,
       body: processedBody,
-      signal
+      signal: requestConfig.signal,
+      timeout,
+      retry: requestConfig.retry,
+      httpClient: requestConfig.httpClient,
     };
     
-    // 执行实例级请求拦截器
-    for (const interceptor of localInterceptors.request.getAll()) {
-      requestCfg = await interceptor(requestCfg);
-    }
-    // 执行默认（全局）请求拦截器，保持兼容
-    for (const interceptor of interceptors.request.getAll()) {
-      requestCfg = await interceptor(requestCfg);
-    }
-    
-    const fetchConfigs: RequestInit = {
-      method: requestCfg.method,
-      headers: requestCfg.headers,
-      body: requestCfg.body,
-      signal: requestCfg.signal,
-    };
-    
-    const resolvedHttpClient = requestConfig.httpClient || instanceConfig.httpClient;
-    
-    try {
-      // 发送请求（支持重试）
-      const response = await fetchWithRetry(requestCfg.url, fetchConfigs, requestConfig.retry, resolvedHttpClient);
-      
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        const contentType = response.headers.get('content-type');
-        let errorData: any;
-        try {
-          if (contentType?.includes('application/json')) {
-            errorData = await response.clone().json();
-          } else if (contentType?.includes('text/')) {
-            errorData = await response.clone().text();
-          } else {
-            errorData = await response.clone().text();
-          }
-        } catch (e) {
-          errorData = null;
-        }
-        throw new ApiError(
-          \`API request failed: \${response.status} \${response.statusText}\`,
-          response.status,
-          response,
-          errorData
-        );
-      }
-      
-      // 解析响应数据
-      const contentType = response.headers.get('content-type')
-      let data: any;
-      if (contentType?.includes('application/json')) {
-        data = await response.json()
-      } else if (contentType?.includes('text/')) {
-        data = await response.text()
-      } else if (contentType?.includes('application/octet-stream') || contentType?.includes('image/')) {
-        data = await response.blob()
-      } else {
-        data = await response.json()
-      }
-      
-      let result: ApiResponse<any> = { data, response };
-      
-      // 执行响应拦截器：实例级 → 默认
-      for (const interceptor of localInterceptors.response.getAll()) {
-        result = await interceptor(result);
-      }
-      for (const interceptor of interceptors.response.getAll()) {
-        result = await interceptor(result);
-      }
-      
-      return result;
-      
-    } catch (error) {
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      const apiError = error instanceof ApiError 
-        ? error 
-        : new ApiError(
-            error instanceof Error ? error.message : String(error),
-            0,
-            null as any,
-            null
-          );
-      
-      // 错误拦截器：实例级 → 默认
-      for (const interceptor of localInterceptors.error.getAll()) {
-        await interceptor(apiError);
-      }
-      for (const interceptor of interceptors.error.getAll()) {
-        await interceptor(apiError);
-      }
-      
-      // 实例优先的错误处理，其次使用全局 onError
-      if (localOnError) {
-        localOnError(apiError);
-      } else if (onError) {
-        onError(apiError);
-      }
-      
-      throw apiError;
-    }
+    return coreRequest(requestCfg);
   };
 
   const boundClient = client as ApiClientInstance;
+  boundClient.request = coreRequest;
   boundClient.config = instanceConfig;
   boundClient.interceptors = localInterceptors;
   boundClient.setErrorHandler = (handler: (error: ApiError) => void) => {
