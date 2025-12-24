@@ -551,6 +551,7 @@ export interface RequestConfig {
     retryOn?: (error: ApiError) => boolean;
   };
   httpClient?: HttpClient;
+  [key: string]: any;
 }
 
 /**
