@@ -24,6 +24,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "pnpm build"
   },
   "keywords": [
@@ -45,7 +47,8 @@
     "@types/node": "^24.9.1",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
-    "vite": "^7.1.12"
+    "vite": "^7.1.12",
+    "vitest": "^4.1.7"
   },
   "packageManager": "pnpm@10.12.4",
   "dependencies": {
